@@ -156,6 +156,7 @@ def test_wall_termination(env):
     assert reset_info == {
         "hits": 0,
         "wall_death": False,
+        "fall_death": False,
         "spawns": 0,
         "min_approach": -1.0,
     }
@@ -170,6 +171,37 @@ def test_wall_termination(env):
     assert info["wall_death"]
     # The killing step scores nothing; the shortened episode is the whole cost.
     assert reward == pytest.approx(0.0, abs=1e-12)
+
+
+def test_falling_is_lethal(env):
+    """Torso below 0.5 m terminates, and the killing step scores 0.0.
+
+    Falling is a death, not a penalty: that is what keeps survival time the
+    only score while still making standing a precondition for it. Also pins
+    that a crouch well above the limit does NOT kill, so the threshold cannot
+    quietly drift upward into ordinary motion.
+    """
+    env.reset(seed=4)
+    qadr = _freejoint_qposadr(env.model, "torso")
+
+    # Fallen: lethal.
+    env.data.qpos[qadr + 2] = 0.3
+    env.data.qvel[:] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+    _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
+    assert terminated, "a fallen humanoid must die"
+    assert info["fall_death"]
+    assert not info["wall_death"] and info["hits"] == 0, "wrong cause of death"
+    assert reward == pytest.approx(0.0, abs=1e-12)
+
+    # Upright: not lethal, and scores a normal surviving step.
+    env.reset(seed=4)
+    env.data.qvel[:] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+    assert _torso_pos(env)[2] > 0.5, "fixture humanoid should start upright"
+    _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
+    assert not terminated and not info["fall_death"]
+    assert reward == pytest.approx(1.0, abs=1e-12)
 
 
 def test_hit_is_instantly_lethal_and_despawns(env):
@@ -373,7 +405,7 @@ def test_reward_is_zero_on_the_step_that_kills(env):
     assert reward == pytest.approx(0.0, abs=1e-12)
 
 
-def test_spawn_schedule(env):
+def test_spawn_schedule(env, monkeypatch):
     """First spawn at t in (0.495, 0.515]; inter-spawn gaps within U(1.0, 2.5).
 
     Gaps are measured on the 0.015 s control grid, so the upper bound admits
@@ -386,6 +418,10 @@ def test_spawn_schedule(env):
     # after one or two spawns and the schedule would never be observed.
     # Suppressing hit registration isolates the timer without altering it.
     env._register_hits = lambda: None
+    # Same reason for falling: under zero action the humanoid collapses within
+    # a second and the episode would end long before the schedule is visible.
+    # Disabling the floor rather than the timer keeps what is under test intact.
+    monkeypatch.setattr("dodge_rl.dodge_env.FALL_LIMIT", -1.0)
     action = np.zeros(env.model.nu)
     spawn_times = []
     spawn_step_idx = []

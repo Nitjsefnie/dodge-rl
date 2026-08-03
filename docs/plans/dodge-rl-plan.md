@@ -154,12 +154,32 @@ ordering).
   head/torso/pelvis set). `min_approach` is now diagnostics only — it no
   longer enters the reward, but it shows whether near-misses are tightening.
 
-**Termination:** two lethal failure modes, both terminal —
+**Termination:** three lethal failure modes, all terminal —
 - **hit**: ANY contact between a projectile geom and any humanoid geom, however
   glancing. There is no damage model and no partial hit; a graze is exactly as
   fatal as a direct strike. (Superseded the earlier "hit is non-terminal;
   wall is the only death" decision.)
 - **wall**: torso |x| > 1.5 or |y| > 1.5.
+- **fall**: torso z < 0.5. Added 2026-08-03 on evidence, see below.
+
+**Why falling is a death and not a penalty (2026-08-03):** with survival-only
+reward and no upright term, a policy trained 1M steps was *statistically
+identical to random* — 283.2 ± 129.0 vs 283.6 ± 127.6 mean episode length over
+150 matched episodes, and `min_approach` marginally worse (0.284 vs 0.312).
+The cause was measured, not guessed: the humanoid spent **83–84% of every
+episode with its torso below 0.5 m** (standing is ~1.3–1.4 m), i.e. lying on
+the floor, and the trained policy was *worse* than random on upright fraction
+(0.063 vs 0.091). The hit distribution agreed — butt 20.6%, feet 11.1%, limbs
+throughout: the contact profile of a body lying down. A sprawled humanoid
+cannot dodge, so episode length was set by when a projectile happened to
+arrive rather than by the policy, leaving return variance (σ≈127 on a mean of
+283) dominated by spawn RNG and the gradient drowned in it.
+Making falling *lethal* rather than penalised keeps the score purely survival
+time — no upright bonus, no shaping — while making standing instrumentally
+necessary and collapsing credit assignment to a single step, exactly as a hit
+does. Note also that the earlier `wall_death` improvement (0.24–0.41 → 0.02)
+was NOT a learning result: a random policy also scores 0.000, because episodes
+now end on a projectile long before the humanoid can travel 1.5 m.
 
 **Truncation:** 2000 steps.
 

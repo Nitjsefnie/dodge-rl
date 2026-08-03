@@ -158,7 +158,7 @@ def main() -> None:
     vec_env = VecMonitor(
         SubprocVecEnv(env_fns),
         filename=str(monitor_csv),
-        info_keywords=("hits", "wall_death", "spawns", "min_approach"),
+        info_keywords=("hits", "wall_death", "fall_death", "spawns", "min_approach"),
     )
 
     if args.resume:

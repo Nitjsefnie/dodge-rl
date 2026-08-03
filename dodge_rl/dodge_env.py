@@ -18,9 +18,9 @@ Reward per control step:
 
     That is the whole reward. There is no shaping, no upright bonus, no
     control cost and no penalty term: the episode ending early IS the
-    punishment, and total return equals steps survived. Both failure modes
-    terminate — ANY projectile contact, however glancing, and torso
-    |x| > 1.5 or |y| > 1.5.
+    punishment, and total return equals steps survived. Three failure modes
+    terminate — ANY projectile contact however glancing, torso
+    |x| > 1.5 or |y| > 1.5, and torso z < 0.5 (fallen).
 
 info["min_approach"] is diagnostics only — it no longer enters the reward,
 but it is the metric that shows whether near-misses are tightening.
@@ -29,6 +29,7 @@ info["min_approach"] uses -1.0 as a sentinel while no projectile has been
 active yet this episode (a real approach distance is always >= 0).
 """
 
+import os
 from pathlib import Path
 
 import mujoco
@@ -59,6 +60,34 @@ PROXIMITY_NAMES = ["head", "torso", "pelvis"]
 PROXIMITY_RADIUS = 1.2
 
 WALL_LIMIT = 1.5
+
+# Torso height below which the humanoid counts as fallen, and dies.
+#
+# Measured, not guessed: with survival-only reward and no upright term, the
+# humanoid spent 83-84% of every episode with its torso below 0.5 m (standing
+# is ~1.3-1.4 m) and a policy trained for 1M steps was statistically identical
+# to random — 283.2 vs 283.6 mean episode length over 150 matched episodes.
+# A sprawled humanoid cannot dodge, so episode length was decided by when a
+# projectile happened to arrive rather than by anything the policy did, and
+# the gradient drowned in spawn noise. The hit distribution said the same
+# thing: butt 20.6%, feet 11.1% — the contact profile of a body lying down.
+#
+# Making falling lethal keeps the score purely survival time (no upright
+# bonus, no shaping) while making standing instrumentally necessary, and
+# collapses the credit assignment to a single step, exactly as a hit does.
+# 0.5 m sits well below a deep crouch and well above lying down.
+FALL_LIMIT = 0.5
+
+# Diagnostic: when DODGE_DEBUG_HIT_GEOMS=1, info gains "hit_geoms", a per-geom
+# tally of what the projectiles actually struck. Off by default and inert when
+# off, so it costs nothing and changes no observation, reward or hash.
+#
+# Why it exists: hit detection fires on EVERY humanoid geom, while
+# min_approach is measured only against PROXIMITY_NAMES (head, torso, pelvis).
+# With ~0.98 hits per episode but a mean min_approach of ~0.32 — far above the
+# ~0.15 m contact threshold — most contacts must be landing on geoms the
+# metric never watches. This says which.
+DEBUG_HIT_GEOMS = os.environ.get("DODGE_DEBUG_HIT_GEOMS") == "1"
 
 # Survival time is the entire score: +1 per step survived, 0 on the step that
 # kills. Total episode return is therefore exactly the number of steps the
@@ -213,9 +242,11 @@ class DodgeEnv(MujocoEnv):
     def _init_episode_state(self):
         self._next_spawn_time = FIRST_SPAWN_TIME
         self._step_hits = 0
+        self._hit_geoms = {}
         self._hits = 0
         self._spawns = 0
         self._wall_death = False
+        self._fall_death = False
         self._min_approach = np.inf
 
     def _point_pos(self, name):
@@ -338,6 +369,12 @@ class DodgeEnv(MujocoEnv):
                 other = g1
             if slot is not None and other in self._humanoid_geom_ids:
                 hit_slots.add(slot)
+                if DEBUG_HIT_GEOMS:
+                    name = mujoco.mj_id2name(
+                        self.model, mujoco.mjtObj.mjOBJ_GEOM, int(other)
+                    )
+                    key = name or f"geom{int(other)}"
+                    self._hit_geoms[key] = self._hit_geoms.get(key, 0) + 1
         for slot in hit_slots:
             if not self._slots[slot]["active"]:
                 continue
@@ -438,14 +475,19 @@ class DodgeEnv(MujocoEnv):
                 continue
             self._min_approach = min(self._min_approach, self._min_approach_distance(slot))
 
-        # Two lethal failure modes, both terminal.
+        # Three lethal failure modes, all terminal.
         wall_out = bool(abs(torso_pos[0]) > WALL_LIMIT or abs(torso_pos[1]) > WALL_LIMIT)
         if wall_out:
             self._wall_death = True
         # ANY contact kills, however glancing: there is no partial hit and no
         # damage model, so a graze is exactly as fatal as a direct hit.
         hit = self._step_hits > 0
-        terminated = bool(wall_out or hit)
+        # Falling kills too. Not a penalty term — a death — so survival time
+        # stays the only score while standing becomes a precondition for it.
+        fallen = bool(torso_pos[2] < FALL_LIMIT)
+        if fallen:
+            self._fall_death = True
+        terminated = bool(wall_out or hit or fallen)
 
         # Survival time is the score. No shaping term, no penalty: the episode
         # ending early is itself the entire cost, and undiscounted return
@@ -455,13 +497,19 @@ class DodgeEnv(MujocoEnv):
         return self._get_obs(), float(reward), terminated, False, self._info()
 
     def _info(self):
-        return {
+        info = {
             "hits": self._hits,
             "wall_death": self._wall_death,
+            "fall_death": self._fall_death,
             "spawns": self._spawns,
             # Sentinel: -1.0 while no projectile has been active this episode.
             "min_approach": self._min_approach if np.isfinite(self._min_approach) else -1.0,
         }
+        if DEBUG_HIT_GEOMS:
+            # Only present when the flag is set, so the default info contract
+            # (and every test asserting it exactly) is untouched.
+            info["hit_geoms"] = dict(self._hit_geoms)
+        return info
 
     def _get_reset_info(self):
         return self._info()
