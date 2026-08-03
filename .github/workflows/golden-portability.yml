@@ -63,3 +63,5 @@ jobs:
           python -c "import numpy, mujoco, gymnasium; print('numpy', numpy.__version__, '| mujoco', mujoco.__version__, '| gymnasium', gymnasium.__version__)"
           echo -n "HASH "
           python bench/golden_traj.py
+          echo "--- divergence vs the box reference trajectory ---"
+          python bench/golden_traj.py --check-approx bench/golden_traj_ref.npz --profile
