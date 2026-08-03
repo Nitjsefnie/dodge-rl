@@ -1,0 +1,96 @@
+name: bench
+
+# Throughput benching on a clean machine.
+#
+# Why here and not on the training box: that box is shared and is *also*
+# running the 20M-step training job, so every local number carries an unknown,
+# time-varying amount of co-tenant contention. A public-repo GitHub runner is
+# 4 vCPU / 16 GB with nothing else on it — the absolute steps/s will not match
+# the 12-vCPU box, but a *ratio between variants* measured here is not
+# confounded by a neighbour.
+#
+# Caveat kept in the open: n-envs defaults to 6 (what training runs) on a
+# 4-vCPU runner, so the workers are oversubscribed. That is deliberate — it is
+# the production shape — but it means a variant difference here is evidence
+# about the configuration, not a prediction of the box's absolute throughput.
+
+on:
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: 'Comma-separated variants (see bench/sweep.py VARIANTS)'
+        default: 'threads1,threads2,threads1-passive,threads2-passive'
+      rounds:
+        description: 'Measured rounds per variant'
+        default: '3'
+      warmup_rounds:
+        description: 'Discarded leading rounds'
+        default: '1'
+      total_timesteps:
+        description: 'Timesteps per measurement (24576 = 2 rollout+update cycles at 6 envs)'
+        default: '24576'
+      n_envs:
+        description: 'SubprocVecEnv workers'
+        default: '6'
+      baseline:
+        description: 'Variant the ratios are relative to'
+        default: 'threads2'
+      note:
+        description: 'PREDICTION, written before the run (field-guide discipline)'
+        default: ''
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Machine and library provenance
+        run: |
+          nproc
+          cat /proc/cpuinfo | grep -m1 'model name'
+          free -g | head -2
+          python -c "import torch; print('torch', torch.__version__); print(torch.__config__.parallel_info())"
+
+      - name: Golden trajectory hash (env behaviour must be untouched)
+        run: python bench/golden_traj.py --check
+
+      - name: Fail-fast smoke (one short measurement)
+        run: python bench/bench_learn.py --total-timesteps 4096 --n-envs 2
+
+      - name: Interleaved sweep
+        run: |
+          python bench/sweep.py \
+            --variants '${{ inputs.variants }}' \
+            --rounds '${{ inputs.rounds }}' \
+            --warmup-rounds '${{ inputs.warmup_rounds }}' \
+            --total-timesteps '${{ inputs.total_timesteps }}' \
+            --n-envs '${{ inputs.n_envs }}' \
+            --baseline '${{ inputs.baseline }}' \
+            --note '${{ inputs.note }}' \
+            --json-out sweep-results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-results
+          path: sweep-results.json
+          if-no-files-found: warn

@@ -5,3 +5,5 @@ __pycache__/
 .superpowers/
 *.mp4
 *.egg-info/
+handoff-*.md
+docs/handoff-*.html
