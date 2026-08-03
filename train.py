@@ -2,7 +2,9 @@
 """PPO training script for DodgeHumanoid-v0."""
 
 import argparse
+import signal
 import sys
+import time
 from collections import deque
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import gymnasium as gym
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 
 
@@ -35,8 +38,16 @@ class ProgressCallback(BaseCallback):
 
     def __init__(self, verbose: int = 0):
         super().__init__(verbose)
-        self._next_print = self.PRINT_INTERVAL
+        self._next_print: int | None = None
         self._episodes: deque[dict] = deque(maxlen=self.LOOKBACK)
+
+    def _on_training_start(self) -> None:
+        # Avoid a torrent of progress lines when resuming from N steps.
+        ts = self.model.num_timesteps
+        self._next_print = (
+            ((ts + self.PRINT_INTERVAL - 1) // self.PRINT_INTERVAL)
+            * self.PRINT_INTERVAL
+        )
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos") or []
@@ -87,12 +98,18 @@ def main() -> None:
     seed = args.seed
     run_name = args.run_name or f"ppo-{seed}-{total_steps}"
     run_dir = Path(args.out_dir) / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-
     monitor_csv = run_dir / "monitor.csv"
+
     if monitor_csv.exists() and args.resume is None:
         print(f"Refusing to clobber existing run: {run_dir}", file=sys.stderr)
         sys.exit(2)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # VecMonitor opens monitor.csv in write mode; preserve prior rows on resume.
+    if args.resume and monitor_csv.exists():
+        backup = run_dir / f"monitor.csv.{int(time.time())}.bak"
+        monitor_csv.rename(backup)
 
     env_fns = [make_env_factory(seed, i) for i in range(n_envs)]
     vec_env = VecMonitor(
@@ -102,7 +119,8 @@ def main() -> None:
     )
 
     if args.resume:
-        model = PPO.load(args.resume, env=vec_env)
+        model = PPO.load(args.resume, env=vec_env, device="cpu")
+        set_random_seed(args.seed)
     else:
         model = PPO(
             "MlpPolicy",
@@ -126,6 +144,12 @@ def main() -> None:
         name_prefix="ckpt",
     )
     progress_callback = ProgressCallback()
+
+    # Convert SIGTERM into a SystemExit so the finally block saves interrupt.zip.
+    signal.signal(
+        signal.SIGTERM,
+        lambda _signum, _frame: sys.exit(143),
+    )
 
     interrupted = False
     try:
