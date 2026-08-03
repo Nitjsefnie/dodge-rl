@@ -41,6 +41,12 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 BENCH_LEARN = _HERE / "bench_learn.py"
 
+# Pseudo-key in a variant overlay: not an environment variable, but the worker
+# count passed to bench_learn.py as --n-envs. Kept in the same registry so one
+# sweep can mix the threading and worker-count axes, and stripped before the
+# overlay is handed to the child's environment.
+_N_ENVS = "_n_envs"
+
 # Variant registry. The value is the environment overlay; an explicit empty
 # string means "unset this variable for the child" (so a variant is not
 # contaminated by whatever the surrounding shell exported).
@@ -66,6 +72,18 @@ VARIANTS: dict[str, dict[str, str]] = {
         "OMP_WAIT_POLICY": "PASSIVE",
         "KMP_BLOCKTIME": "0",
     },
+    # Worker-count axis. SubprocVecEnv steps every worker in lockstep and then
+    # the main process does ONE policy forward over the batch, so at n_envs=6
+    # the box sits at ~2.2 busy cores out of 12: not CPU-bound, lockstep-bound.
+    # Widening the batch buys more env-steps per forward without adding
+    # forwards. These carry no threading overrides — they inherit train.py's
+    # defaults, so this axis varies exactly one thing.
+    "envs4": {_N_ENVS: "4"},
+    "envs6": {_N_ENVS: "6"},
+    "envs8": {_N_ENVS: "8"},
+    "envs12": {_N_ENVS: "12"},
+    "envs16": {_N_ENVS: "16"},
+    "envs24": {_N_ENVS: "24"},
 }
 
 DEFAULT_VARIANTS = "threads1,threads2,threads1-passive,threads2-passive"
@@ -86,12 +104,13 @@ def child_env(overlay: dict[str, str]) -> dict[str, str]:
     env = dict(os.environ)
     for var in _MANAGED_VARS:
         env.pop(var, None)
-    env.update(overlay)
+    env.update({k: v for k, v in overlay.items() if k != _N_ENVS})
     return env
 
 
 def measure(label: str, overlay: dict[str, str], total_timesteps: int, n_envs: int) -> dict:
     """One measurement of one variant, in a fresh process. Returns its JSON."""
+    effective_n_envs = int(overlay.get(_N_ENVS, n_envs))
     cmd = [
         sys.executable,
         str(BENCH_LEARN),
@@ -101,7 +120,7 @@ def measure(label: str, overlay: dict[str, str], total_timesteps: int, n_envs: i
         "--total-timesteps",
         str(total_timesteps),
         "--n-envs",
-        str(n_envs),
+        str(effective_n_envs),
         "--label",
         label,
     ]

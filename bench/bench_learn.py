@@ -46,8 +46,16 @@ SEED = 1
 TOTAL_TIMESTEPS = 3 * N_ENVS * 2048  # 36864 — three rollout+update cycles
 
 
-def one_run(total_timesteps: int = TOTAL_TIMESTEPS, n_envs: int = N_ENVS) -> float:
-    """Run ``learn`` once; return elapsed wall-clock seconds."""
+def one_run(total_timesteps: int = TOTAL_TIMESTEPS, n_envs: int = N_ENVS) -> tuple[float, int]:
+    """Run ``learn`` once; return (elapsed wall-clock seconds, steps actually run).
+
+    The step count is read back from the model rather than assumed to equal the
+    request. SB3 collects whole rollouts, so it overshoots to the next multiple
+    of ``n_envs * n_steps`` — at n_envs=16 a request for 24576 actually runs
+    32768. Dividing the *requested* steps by the elapsed time would then report
+    a large n_envs as slower than it is (or a small one as faster), which is
+    exactly the comparison an n_envs sweep exists to make.
+    """
     torch.set_num_threads(train.TORCH_NUM_THREADS)
 
     env_fns = [train.make_env_factory(SEED, i) for i in range(n_envs)]
@@ -66,9 +74,10 @@ def one_run(total_timesteps: int = TOTAL_TIMESTEPS, n_envs: int = N_ENVS) -> flo
             t0 = time.perf_counter()
             model.learn(total_timesteps=total_timesteps, reset_num_timesteps=True)
             elapsed = time.perf_counter() - t0
+            actual_steps = int(model.num_timesteps)
         finally:
             vec_env.close()
-    return elapsed
+    return elapsed, actual_steps
 
 
 def main() -> int:
@@ -81,17 +90,21 @@ def main() -> int:
     args = parser.parse_args()
 
     rates = []
+    steps_run = []
     for i in range(args.repeats):
-        elapsed = one_run(args.total_timesteps, args.n_envs)
-        rate = args.total_timesteps / elapsed
+        elapsed, actual_steps = one_run(args.total_timesteps, args.n_envs)
+        rate = actual_steps / elapsed
         rates.append(rate)
+        steps_run.append(actual_steps)
         if not args.json:
-            print(f"run {i + 1}/{args.repeats}: {elapsed:.2f} s  {rate:.1f} steps/s", flush=True)
+            print(f"run {i + 1}/{args.repeats}: {elapsed:.2f} s  {actual_steps} steps  "
+                  f"{rate:.1f} steps/s", flush=True)
 
     result = {
         "label": args.label,
         "total_timesteps": args.total_timesteps,
-        "n_envs": N_ENVS,
+        "steps_actually_run": steps_run,
+        "n_envs": args.n_envs,
         "runs": [round(r, 2) for r in rates],
         "median_steps_per_s": round(statistics.median(rates), 2),
         "min_steps_per_s": round(min(rates), 2),
