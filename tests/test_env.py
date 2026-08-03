@@ -151,7 +151,7 @@ def test_precise_aim_geometry(env):
 
 
 def test_wall_termination(env):
-    """Torso beyond |x| > 1.5 terminates with reward <= -100 + step bounds."""
+    """Torso beyond |x| > 1.5 terminates, and the killing step scores 0.0."""
     _, reset_info = env.reset(seed=1)
     assert reset_info == {
         "hits": 0,
@@ -168,13 +168,16 @@ def test_wall_termination(env):
     assert terminated
     assert not truncated
     assert info["wall_death"]
-    # reward = -100 + upright (0 or 1); no spawns yet at t = 0.015 s, zero action
-    assert reward <= -99.0 + 1e-9
-    assert reward >= -100.0 - 1e-9
+    # The killing step scores nothing; the shortened episode is the whole cost.
+    assert reward == pytest.approx(0.0, abs=1e-12)
 
 
-def test_hit_penalty_and_despawn(env):
-    """A projectile forced into the torso: -50 once, despawn, episode continues."""
+def test_hit_is_instantly_lethal_and_despawns(env):
+    """A projectile forced into the torso: episode ends immediately, projectile parked.
+
+    Any contact is fatal regardless of magnitude — there is no damage model and
+    no partial hit, so this also pins that the episode does NOT continue.
+    """
     env.reset(seed=2)
     env._spawn_projectile(0)  # proper slot activation; placement overridden below
 
@@ -188,14 +191,13 @@ def test_hit_penalty_and_despawn(env):
 
     _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
     assert info["hits"] == 1
-    assert not terminated
+    assert terminated, "any projectile contact must end the episode"
     assert not env._slots[0]["active"], "hit projectile must despawn"
     # Parked back below the floor with zero velocity.
     assert env.data.qpos[qadr + 2] == pytest.approx(-10.0)
     assert np.all(env.data.qvel[vadr : vadr + 6] == 0.0)
-    # reward = -50 + upright (0 or 1); no other active projectiles, zero action
-    assert reward <= -49.0 + 1e-9
-    assert reward >= -50.0 - 1e-9
+    # The killing step scores nothing; the shortened episode is the whole cost.
+    assert reward == pytest.approx(0.0, abs=1e-12)
 
 
 def test_determinism():
@@ -308,43 +310,67 @@ def test_anatomy_guard(env):
 # ---------------------------------------------------------------------------
 
 
-def test_reward_decomposition_exact(env):
-    """One known step: reward == upright + proximity + ctrl, exactly.
+def test_reward_is_exactly_survival_time(env):
+    """A surviving step scores exactly 1.0 — nothing else may enter the reward.
 
-    Pins the sign and all three coefficients at once. d is recomputed from
-    the post-step state against the same {head, torso, pelvis} point set the
-    env uses (head is a geom, the others are bodies).
+    Deliberately arranged so that every term the reward used to carry would be
+    non-zero if it came back: a projectile 0.6 m away (the old proximity
+    shaping would contribute -0.18), a large non-zero action (the old control
+    cost would contribute about -0.077), and a separate case with the torso
+    outside the old upright band (which would cost the +1.0). Any of those
+    resurfacing moves the reward off exactly 1.0, so this one assertion pins
+    the absence of all three.
     """
-    env.reset(seed=11)
+    for z, label in ((None, "default pose"), (0.6, "below the old upright band")):
+        env.reset(seed=11)
+        env.data.qvel[:] = 0.0
+        if z is not None:
+            tadr = _freejoint_qposadr(env.model, "torso")
+            env.data.qpos[tadr + 2] = z
+        env._spawn_projectile(0)  # proper slot activation; placement overridden
+
+        torso_pos = _torso_pos(env)
+        qadr = _freejoint_qposadr(env.model, "proj0")
+        vadr = _freejoint_dofadr(env.model, "proj0")
+        env.data.qpos[qadr : qadr + 3] = torso_pos + np.array([0.6, 0.0, 0.0])
+        env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+        env.data.qvel[vadr : vadr + 6] = 0.0
+
+        action = 0.3 * np.ones(env.model.nu)
+        _, reward, terminated, _, info = env.step(action)
+        assert not terminated, f"{label}: setup must not kill the humanoid"
+        assert info["hits"] == 0
+        assert reward == pytest.approx(1.0, abs=1e-12), (
+            f"{label}: surviving step scored {reward}, expected exactly 1.0 — "
+            "a shaping, upright or control-cost term has returned"
+        )
+
+
+def test_reward_is_zero_on_the_step_that_kills(env):
+    """Both lethal endings score 0.0, so return equals steps survived exactly."""
+    # Wall.
+    env.reset(seed=1)
+    qadr = _freejoint_qposadr(env.model, "torso")
+    env.data.qpos[qadr] = 1.6
     env.data.qvel[:] = 0.0
-    env._spawn_projectile(0)  # proper slot activation; placement overridden
+    mujoco.mj_forward(env.model, env.data)
+    _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
+    assert terminated and info["wall_death"]
+    assert reward == pytest.approx(0.0, abs=1e-12)
 
+    # Hit.
+    env.reset(seed=2)
+    env._spawn_projectile(0)
     torso_pos = _torso_pos(env)
-    qadr = _freejoint_qposadr(env.model, "proj0")
-    vadr = _freejoint_dofadr(env.model, "proj0")
-    env.data.qpos[qadr : qadr + 3] = torso_pos + np.array([0.6, 0.0, 0.0])
-    env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
-    env.data.qvel[vadr : vadr + 6] = 0.0
-
-    action = 0.3 * np.ones(env.model.nu)
-    _, reward, terminated, _, _ = env.step(action)
-    assert not terminated
-
-    # Hand-compute from the post-step state (the env scores post-substep).
-    proj_pos = env.data.qpos[qadr : qadr + 3].copy()
-    head_pos = env.data.geom_xpos[
-        mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "head")
-    ]
-    points = [_torso_pos(env), head_pos, env.data.xpos[_body_id(env.model, "pelvis")]]
-    d = min(np.linalg.norm(proj_pos - p) for p in points)
-
-    expected = 0.0
-    torso_z = _torso_pos(env)[2]
-    if 1.0 <= torso_z <= 2.0:
-        expected += 1.0
-    expected -= 0.5 * max(0.0, 1.2 - d) ** 2
-    expected -= 0.05 * float(action @ action)
-    assert reward == pytest.approx(expected, abs=1e-6)
+    pqadr = _freejoint_qposadr(env.model, "proj0")
+    pvadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[pqadr : pqadr + 3] = torso_pos
+    env.data.qpos[pqadr + 3 : pqadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+    env.data.qvel[pvadr : pvadr + 6] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+    _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
+    assert terminated and info["hits"] == 1
+    assert reward == pytest.approx(0.0, abs=1e-12)
 
 
 def test_spawn_schedule(env):
@@ -355,6 +381,11 @@ def test_spawn_schedule(env):
     exempt from the upper bound (the spawn correctly stayed pending).
     """
     env.reset(seed=5)
+    # The spawn timer is what is under test, not lethality. Now that any
+    # contact ends the episode, an unlucky hit would cut the rollout short
+    # after one or two spawns and the schedule would never be observed.
+    # Suppressing hit registration isolates the timer without altering it.
+    env._register_hits = lambda: None
     action = np.zeros(env.model.nu)
     spawn_times = []
     spawn_step_idx = []
@@ -442,7 +473,7 @@ def test_despawn_distance(env):
 
 
 def test_hit_detected_mid_control_step(env):
-    """A hit visible only in the early substeps must still score -50.
+    """A hit visible only in the early substeps must still be registered and kill.
 
     The projectile starts 0.06 m from the right_hand centre (surfaces
     overlap: 0.08 + 0.04 = 0.12) with a 9 m/s velocity carrying it away.
@@ -470,8 +501,8 @@ def test_hit_detected_mid_control_step(env):
 
     _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
     assert info["hits"] == 1, "contact during early substeps was missed"
-    assert reward <= -49.0 + 1e-9
-    assert not terminated
+    assert terminated, "a glancing mid-substep contact is as lethal as any other"
+    assert reward == pytest.approx(0.0, abs=1e-12)
     assert not env._slots[0]["active"]
 
 
@@ -562,43 +593,11 @@ def test_render_metadata_declared():
 # ---------------------------------------------------------------------------
 
 
-def test_upright_band_edges(env):
-    """The +1.0 upright term applies only inside torso z in [1.0, 2.0].
-
-    Out-of-band cases (z = 0.6 below, z = 2.5 above): with no active
-    projectiles, zero action, and no wall/hit event, the step reward must be
-    exactly 0.0 — a widened UPRIGHT_Z_RANGE such as (0.0, 3.0) or (1.0, 9.0)
-    would emit +1.0 and fail. In-band case (z = 1.2) must yield exactly +1.0.
-    Expected values are computed from the post-step torso z, the same state
-    the env scores.
-    """
-    for z, label in ((0.6, "below"), (1.2, "inside"), (2.5, "above")):
-        env.reset(seed=31)
-        env.data.qvel[:] = 0.0
-        qadr = _freejoint_qposadr(env.model, "torso")
-        env.data.qpos[qadr + 2] = z
-        mujoco.mj_forward(env.model, env.data)
-
-        _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
-        assert not terminated
-        assert info["hits"] == 0 and info["spawns"] == 0  # t = 0.015 s < 0.5 s
-
-        torso_z = _torso_pos(env)[2]
-        expected = 1.0 if 1.0 <= torso_z <= 2.0 else 0.0
-        if z == 0.6:
-            # 0.015 s of dynamics cannot lift the torso into the band.
-            assert torso_z < 1.0, (
-                f"{label} case: post-step torso z {torso_z} unexpectedly in band"
-            )
-        if z == 2.5:
-            # Freefall from 2.5 m drops only ~1 mm in one 0.015 s step.
-            assert torso_z > 2.0, (
-                f"{label} case: post-step torso z {torso_z} unexpectedly in band"
-            )
-        assert reward == pytest.approx(expected, abs=1e-6), (
-            f"{label} case, z start {z}: reward {reward}, expected {expected} "
-            f"(post-step z {torso_z})"
-        )
+# test_upright_band_edges was removed here: the +1.0 upright term it pinned
+# no longer exists. Survival time is the entire reward, so there is no
+# upright band left to have edges. Its mutation-kill role is taken over by
+# test_reward_is_exactly_survival_time, which fails if any pose-dependent
+# term re-enters the reward.
 
 
 class _ClampForcingRng(np.random.Generator):

@@ -6,20 +6,24 @@ bodies (``proj0..proj3``, freejoint spheres with ``gravcomp=1``) are parked
 below the floor while inactive and launched at the humanoid by a stochastic
 spawner.
 
-Observation (float64, shape (73,)):
+Observation (float64, shape (77,)):
     humanoid qpos[2:] (root x,y excluded; 22) + full humanoid qvel (23)
+    + wall block [1.5-x, 1.5+x, 1.5-y, 1.5+y] from torso xpos (4)
     + 4 slot blocks of [active_flag, rel_pos(3), rel_vel(3)] (7 each),
     relative to the torso body, slots ordered by time-to-closest-approach
     ascending with inactive (all-zero) blocks last.
 
 Reward per control step:
-    +1.0 upright (torso z in [1.0, 2.0])
-    -0.5 * sum over active projectiles of max(0, 1.2 - d)^2, d = distance to
-        the nearest of {head, torso, pelvis}
-    -50 per projectile/humanoid contact this step (projectile despawns, the
-        episode continues)
-    -100 and terminated when torso |x| > 1.5 or |y| > 1.5
-    -0.05 * ||action||^2
+    +1.0 for every step survived, 0.0 on the step that ends the episode.
+
+    That is the whole reward. There is no shaping, no upright bonus, no
+    control cost and no penalty term: the episode ending early IS the
+    punishment, and total return equals steps survived. Both failure modes
+    terminate — ANY projectile contact, however glancing, and torso
+    |x| > 1.5 or |y| > 1.5.
+
+info["min_approach"] is diagnostics only — it no longer enters the reward,
+but it is the metric that shows whether near-misses are tightening.
 
 info["min_approach"] uses -1.0 as a sentinel while no projectile has been
 active yet this episode (a real approach distance is always >= 0).
@@ -54,19 +58,19 @@ TARGET_WEIGHTS = [0.15, 0.30, 0.20, 0.10, 0.10, 0.075, 0.075]
 PROXIMITY_NAMES = ["head", "torso", "pelvis"]
 PROXIMITY_RADIUS = 1.2
 
-HIT_PENALTY = 50.0
-WALL_PENALTY = 100.0
 WALL_LIMIT = 1.5
+
+# Survival time is the entire score: +1 per step survived, 0 on the step that
+# kills. Total episode return is therefore exactly the number of steps the
+# humanoid stayed alive, which is the quantity being optimised — no shaping
+# term can trade against it or be gamed.
+SURVIVAL_REWARD = 1.0
 
 # Observation block reporting distance to each of the four virtual walls, in
 # the order (+x, -x, +y, -y). Root x,y are excluded from the humanoid section
 # by design, which left the arena — the only terminal failure mode — entirely
 # invisible to the policy while it was ending 24-33% of episodes.
 WALL_OBS_LEN = 4
-UPRIGHT_Z_RANGE = (1.0, 2.0)
-UPRIGHT_REWARD = 1.0
-CTRL_COST_WEIGHT = 0.05
-PROXIMITY_WEIGHT = 0.5
 INIT_NOISE = 0.01  # uniform +- noise on humanoid qpos/qvel at reset
 
 
@@ -425,25 +429,28 @@ class DodgeEnv(MujocoEnv):
         self._despawn_expired(torso_pos)
         self._maybe_spawn()
 
-        # Wall: lethal virtual walls at |x| = |y| = 1.5 m.
-        terminated = bool(abs(torso_pos[0]) > WALL_LIMIT or abs(torso_pos[1]) > WALL_LIMIT)
-
-        reward = 0.0
-        if UPRIGHT_Z_RANGE[0] <= torso_pos[2] <= UPRIGHT_Z_RANGE[1]:
-            reward += UPRIGHT_REWARD
-
+        # Diagnostics only: min_approach no longer shapes the reward, but it is
+        # the metric that shows whether near-misses are tightening over
+        # training. Kept inside the loop over ACTIVE slots so a despawned
+        # projectile cannot keep contributing.
         for slot in range(NUM_SLOTS):
             if not self._slots[slot]["active"]:
                 continue
-            d = self._min_approach_distance(slot)
-            self._min_approach = min(self._min_approach, d)
-            reward -= PROXIMITY_WEIGHT * max(0.0, PROXIMITY_RADIUS - d) ** 2
+            self._min_approach = min(self._min_approach, self._min_approach_distance(slot))
 
-        reward -= HIT_PENALTY * self._step_hits
-        if terminated:
-            reward -= WALL_PENALTY
+        # Two lethal failure modes, both terminal.
+        wall_out = bool(abs(torso_pos[0]) > WALL_LIMIT or abs(torso_pos[1]) > WALL_LIMIT)
+        if wall_out:
             self._wall_death = True
-        reward -= CTRL_COST_WEIGHT * (action @ action)
+        # ANY contact kills, however glancing: there is no partial hit and no
+        # damage model, so a graze is exactly as fatal as a direct hit.
+        hit = self._step_hits > 0
+        terminated = bool(wall_out or hit)
+
+        # Survival time is the score. No shaping term, no penalty: the episode
+        # ending early is itself the entire cost, and undiscounted return
+        # equals the number of steps survived.
+        reward = 0.0 if terminated else SURVIVAL_REWARD
 
         return self._get_obs(), float(reward), terminated, False, self._info()
 

@@ -143,19 +143,25 @@ time-to-closest-approach ascending, inactive slots last. Projectile qpos/qvel
 are excluded from the humanoid section (mask by joint address, don't assume
 ordering).
 
-**Reward per control step:**
-- upright: `+1.0` when torso z ∈ [1.0, 2.0], else 0. (No fall termination.)
-- proximity shaping: `−0.5 × Σ_active max(0, 1.2 − d_i)²` where `d_i` =
-  distance from projectile i to the nearest of {head, torso, pelvis} xpos.
-- hit: `−50` per contact between a projectile geom and any humanoid geom this
-  step; the projectile despawns; episode CONTINUES.
-- wall: `−100` and `terminated=True` when torso |x| > 1.5 or |y| > 1.5.
-- control cost: `−0.05 × ||action||²`.
+**Reward per control step (amended 2026-08-03 — survival time is the score):**
+- `+1.0` for every step survived; `0.0` on the step that ends the episode.
+- That is the entire reward. No upright bonus, no proximity shaping, no
+  control cost, no penalty terms. Undiscounted return equals exactly the
+  number of steps survived, so nothing can trade against survival or be
+  farmed independently of it.
 - info dict reports per-episode counters: `hits`, `wall_death` (bool),
   `spawns`, `min_approach` (closest any projectile ever got to the
-  head/torso/pelvis set).
+  head/torso/pelvis set). `min_approach` is now diagnostics only — it no
+  longer enters the reward, but it shows whether near-misses are tightening.
 
-**Termination:** wall only. **Truncation:** 2000 steps.
+**Termination:** two lethal failure modes, both terminal —
+- **hit**: ANY contact between a projectile geom and any humanoid geom, however
+  glancing. There is no damage model and no partial hit; a graze is exactly as
+  fatal as a direct strike. (Superseded the earlier "hit is non-terminal;
+  wall is the only death" decision.)
+- **wall**: torso |x| > 1.5 or |y| > 1.5.
+
+**Truncation:** 2000 steps.
 
 **Registration:** `gymnasium.register(id="DodgeHumanoid-v0", ...)` in
 `dodge_rl/__init__.py`, `max_episode_steps=2000`.
