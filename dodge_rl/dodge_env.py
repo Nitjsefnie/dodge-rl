@@ -16,11 +16,13 @@ Observation (float64, shape (77,)):
 Reward per control step:
     +1.0 for every step survived, 0.0 on the step that ends the episode.
 
-    That is the whole reward. There is no shaping, no upright bonus, no
-    control cost and no penalty term: the episode ending early IS the
-    punishment, and total return equals steps survived. Three failure modes
-    terminate — ANY projectile contact however glancing, torso
-    |x| > 1.5 or |y| > 1.5, and torso z < 0.5 (fallen).
+    +10.0 per projectile that passed all the way through the cell (dodged).
+    -50.0 on the step that ends the episode by falling.
+
+    Three failure modes terminate — ANY projectile contact however glancing,
+    torso |x| > 1.5 or |y| > 1.5, and torso z < 0.5 (fallen). Only the fall
+    carries a penalty, so a projectile death at step N returns N while a fall
+    at step N returns N - 50: being shot is strictly better than falling.
 
 info["min_approach"] is diagnostics only — it no longer enters the reward,
 but it is the metric that shows whether near-misses are tightening.
@@ -99,6 +101,15 @@ DEBUG_HIT_GEOMS = os.environ.get("DODGE_DEBUG_HIT_GEOMS") == "1"
 # humanoid stayed alive, which is the quantity being optimised — no shaping
 # term can trade against it or be gamed.
 SURVIVAL_REWARD = 1.0
+
+# Added 2026-08-04 on top of survival time, at the user's direction. These are
+# the first terms since the survival-only rewrite that are not pure survival,
+# so the trade they create is worth stating: an episode that falls at step 40
+# scores 40 - 50 = -10, while one that takes a projectile at step 40 scores
+# +40. Being shot is therefore strictly better than falling, and a dodge is
+# worth ten steps of standing still.
+FALL_PENALTY = 50.0
+DODGE_REWARD = 10.0
 
 # Observation block reporting distance to each of the four virtual walls, in
 # the order (+x, -x, +y, -y). Root x,y are excluded from the humanoid section
@@ -247,6 +258,7 @@ class DodgeEnv(MujocoEnv):
     def _init_episode_state(self):
         self._next_spawn_time = FIRST_SPAWN_TIME
         self._step_hits = 0
+        self._step_dodged = 0
         self._hit_geoms = {}
         self._hits = 0
         self._spawns = 0
@@ -415,6 +427,7 @@ class DodgeEnv(MujocoEnv):
             elif state["in_box"]:
                 state["in_box"] = False
                 self._dodged += 1
+                self._step_dodged += 1
 
     def _despawn_expired(self, torso_pos):
         for slot in range(NUM_SLOTS):
@@ -493,6 +506,7 @@ class DodgeEnv(MujocoEnv):
     def step(self, action):
         action = np.asarray(action, dtype=np.float64)
         self._step_hits = 0
+        self._step_dodged = 0
         self.do_simulation(action, self.frame_skip)
 
         torso_pos = self.data.xpos[self._torso_bid].copy()
@@ -526,10 +540,15 @@ class DodgeEnv(MujocoEnv):
             self._fall_death = True
         terminated = bool(wall_out or hit or fallen)
 
-        # Survival time is the score. No shaping term, no penalty: the episode
-        # ending early is itself the entire cost, and undiscounted return
-        # equals the number of steps survived.
+        # Survival time is the base: +1 per step survived, 0 on the step that
+        # kills. On top of that, a dodge pays and a fall is fined. The dodge
+        # bonus is granted even on a terminal step — the shot was evaded, and
+        # withholding it would make a dodge worthless whenever something else
+        # happened to end the episode on the same tick.
         reward = 0.0 if terminated else SURVIVAL_REWARD
+        reward += DODGE_REWARD * self._step_dodged
+        if fallen:
+            reward -= FALL_PENALTY
 
         return self._get_obs(), float(reward), terminated, False, self._info()
 

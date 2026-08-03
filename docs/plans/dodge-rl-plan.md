@@ -143,12 +143,20 @@ time-to-closest-approach ascending, inactive slots last. Projectile qpos/qvel
 are excluded from the humanoid section (mask by joint address, don't assume
 ordering).
 
-**Reward per control step (amended 2026-08-03 — survival time is the score):**
+**Reward per control step (amended 2026-08-04 — survival plus two terms):**
 - `+1.0` for every step survived; `0.0` on the step that ends the episode.
-- That is the entire reward. No upright bonus, no proximity shaping, no
-  control cost, no penalty terms. Undiscounted return equals exactly the
-  number of steps survived, so nothing can trade against survival or be
-  farmed independently of it.
+- `+10.0` per projectile that passed all the way through the cell (dodged),
+  paid on the step the shot leaves the cell — including a terminal step,
+  since the shot was genuinely evaded.
+- `−50.0` on the step that ends the episode by falling. Hit and wall deaths
+  carry no penalty.
+- **Asymmetry is deliberate and worth restating:** a projectile death at step
+  N returns N, a fall at step N returns N − 50. Being shot is therefore
+  strictly preferable to falling, and a dodge is worth ten steps of standing
+  still. This is the first departure from the pure survival-time objective
+  since that rewrite, made at the user's direction on 2026-08-04; the risk it
+  introduces is that the agent may accept a hit rather than attempt a dodge
+  that could topple it.
 - info dict reports per-episode counters: `hits`, `wall_death` (bool),
   `fall_death` (bool), `dodged`, `spawns`, `min_approach` (closest any
   projectile ever got to the head/torso/pelvis set). `min_approach` is

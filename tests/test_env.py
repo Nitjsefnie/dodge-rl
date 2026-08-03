@@ -200,12 +200,18 @@ def test_dodged_counts_only_projectiles_that_passed_through_the_cell(env):
     torso_z = _torso_pos(env)[2]
     _launch_through(env, [0.5, 0.0, torso_z + 1.0], [10.0, 0.0, 0.0])
     info = {"dodged": 0}
+    reward = 0.0
+    terminated = truncated = False
     for _ in range(30):
-        _, _, terminated, truncated, info = env.step(np.zeros(env.model.nu))
+        _, reward, terminated, truncated, info = env.step(np.zeros(env.model.nu))
         if info["dodged"] or terminated or truncated:
             break
     assert info["dodged"] == 1, "a shot crossing the cell must count as dodged"
     assert info["hits"] == 0, "this shot must not have touched the humanoid"
+    assert not terminated, "the dodge step must not be a death here"
+    # Surviving step (+1) plus the dodge bonus (+10). Pins the bonus size and
+    # that it is paid on the step the shot leaves the cell, not at episode end.
+    assert reward == pytest.approx(11.0, abs=1e-12)
 
     # Never enters the cell: outside in x for its whole flight.
     env.reset(seed=22)
@@ -238,7 +244,8 @@ def test_falling_is_lethal(env):
     assert terminated, "a fallen humanoid must die"
     assert info["fall_death"]
     assert not info["wall_death"] and info["hits"] == 0, "wrong cause of death"
-    assert reward == pytest.approx(0.0, abs=1e-12)
+    # Falling is the one death that also carries a fine.
+    assert reward == pytest.approx(-50.0, abs=1e-12)
 
     # Upright: not lethal, and scores a normal surviving step.
     env.reset(seed=4)
@@ -424,8 +431,14 @@ def test_reward_is_exactly_survival_time(env):
         )
 
 
-def test_reward_is_zero_on_the_step_that_kills(env):
-    """Both lethal endings score 0.0, so return equals steps survived exactly."""
+def test_reward_on_the_step_that_kills(env):
+    """Wall and hit deaths score 0.0; a fall additionally costs -50.
+
+    Pins the asymmetry deliberately, because it is the whole point of the
+    fall penalty: dying at step N to a projectile returns N, dying at step N
+    by falling returns N - 50, so being shot is strictly preferable to
+    toppling over.
+    """
     # Wall.
     env.reset(seed=1)
     qadr = _freejoint_qposadr(env.model, "torso")
@@ -449,6 +462,16 @@ def test_reward_is_zero_on_the_step_that_kills(env):
     _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
     assert terminated and info["hits"] == 1
     assert reward == pytest.approx(0.0, abs=1e-12)
+
+    # Fall: the one death that is also fined.
+    env.reset(seed=3)
+    qadr = _freejoint_qposadr(env.model, "torso")
+    env.data.qpos[qadr + 2] = 0.3
+    env.data.qvel[:] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+    _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
+    assert terminated and info["fall_death"]
+    assert reward == pytest.approx(-50.0, abs=1e-12)
 
 
 def test_spawn_schedule(env, monkeypatch):
