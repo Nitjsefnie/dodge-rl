@@ -205,7 +205,29 @@ ordering).
 - SB3 `PPO("MlpPolicy", ...)`: `policy_kwargs=dict(net_arch=[256, 256])`,
   `n_steps=2048`, `batch_size=4096`, `learning_rate=3e-4`, `gamma=0.99`,
   `gae_lambda=0.95`, `clip_range=0.2`, `ent_coef=0.0`, `device="cpu"`,
-  `torch.set_num_threads(2)`.
+  `torch.set_num_threads(2)`, and `OMP_WAIT_POLICY=PASSIVE` /
+  `KMP_BLOCKTIME=0` set before torch is imported.
+
+**Throughput amendment (2026-08-03) — run with `--n-envs 24`, measured:**
+`SubprocVecEnv` steps every worker in lockstep and then runs ONE policy
+forward over the batch, so at `--n-envs 6` the box sat at ~2.2 busy cores out
+of 12: lockstep-bound, not CPU-bound. Widening the batch is the lever.
+- Clean 4-vCPU runner, 3 interleaved rounds, spread ≤1.4%: 758.6 (envs4),
+  848.6 (envs6), 899.5 (envs8), 987.0 (envs12), 1035.4 (envs16), 1143.9
+  (envs24), 1143.0 (envs32), 1181.5 (envs48) steps/s. Sixteen workers beating
+  six by 1.22× on FOUR cores is the lockstep signature; the curve plateaus at
+  24.
+- End-to-end on the box (monitor.csv, the only throughput evidence that
+  counts here): **134 → 484.9 steps/s, 3.6×**. `--n-envs 48` gave 506.5, i.e.
+  +4.5% for double the processes and memory, so 24 is the knee on both
+  machines.
+- The runner under-predicted the box's gain badly (1.35× vs 3.6×) because it
+  was already core-saturated at 4 cores while the box had ~10 idle cores
+  behind the stall. Direction transfers between machines; magnitude does not.
+- This does not change learning dynamics: gradient updates for a fixed step
+  budget are `total_steps × n_epochs / batch_size`, independent of `n_envs`,
+  and `n_steps=2048` per env keeps the GAE horizon identical. Wider batches,
+  same cadence.
 - Env factory: `SubprocVecEnv` of `--n-envs` `DodgeHumanoid-v0`, wrapped in
   `VecMonitor` writing `monitor.csv` under the run dir; per-env seeds derived
   `seed + rank`.

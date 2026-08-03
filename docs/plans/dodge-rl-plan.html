@@ -254,6 +254,20 @@
       <div class="callout" style="margin-top:14px"><strong>Amendment (2026-08-03):</strong> the wall block was added after the first training run showed <strong>24–33% of episodes ending in wall death</strong> — the arena is the only terminal failure mode, and excluding root x,y made it invisible to the policy. Signed per-wall distances rather than the originally-sketched <code>1.5−|x|</code>: the absolute-value form is symmetric in x, so it conveys how near the wall is but not which way to run. Each entry is positive inside the arena and crosses zero exactly at termination. Observation width 73 → 77; golden hash deliberately moved <code>cd3999d6…</code> → <code>a55500a9…</code>. The change is not resumable — it widens the policy input layer, so the 713,538-step run ended here.</div>
     </section>
 
+    <section id="throughput">
+      <div class="sec-head"><span class="num">04b</span><h2>Throughput</h2></div>
+      <p class="sec-intro">Run with <code>--n-envs 24</code>. Measured, not chosen by taste — and the first two hypotheses this replaced were both wrong.</p>
+      <div class="rtable">
+        <div class="row"><div class="cell head">Configuration</div><div class="cell head">Result</div><div class="cell head">Notes</div></div>
+        <div class="row"><div class="cell">OpenMP spin-wait (the leading hypothesis)</div><div class="cell"><strong>refuted</strong></div><div class="cell">predicted ≥1.5×, measured 1.11× — real but not the problem</div></div>
+        <div class="row"><div class="cell"><code>PASSIVE</code> / <code>KMP_BLOCKTIME=0</code></div><div class="cell">1.11×</div><div class="cell">landed as the default; set before torch import</div></div>
+        <div class="row"><div class="cell"><code>--n-envs</code> 6 → 24</div><div class="cell"><strong>3.6× on the box</strong></div><div class="cell">134 → 484.9 steps/s end-to-end (monitor.csv)</div></div>
+        <div class="row"><div class="cell"><code>--n-envs</code> 48</div><div class="cell">+4.5% over 24</div><div class="cell">double the processes and memory for noise; 24 is the knee</div></div>
+      </div>
+      <div class="callout" style="margin-top:14px"><strong>Why it works, and why the bench under-predicted it:</strong> <code>SubprocVecEnv</code> steps every worker in lockstep and then runs ONE policy forward over the batch, so at <code>--n-envs 6</code> the box sat at ~2.2 busy cores out of 12 — lockstep-bound, not CPU-bound. On the clean 4-vCPU runner the same change measured only 1.35×, because that machine was already core-saturated; the box had ~10 idle cores sitting behind the stall. <strong>Direction transfers between machines, magnitude does not.</strong> Separately: the box runs <em>everything</em> ~5.7× slower than a clean runner (its test suite takes 238s vs 41s), so the originally-assumed ~1,600 steps/s target was never reachable there.</div>
+      <div class="callout" style="margin-top:10px">Learning dynamics are unchanged: gradient updates for a fixed step budget are <code>total_steps × n_epochs / batch_size</code>, independent of <code>n_envs</code>, and <code>n_steps=2048</code> per env keeps the GAE horizon identical. Wider batches, same update cadence.</div>
+    </section>
+
     <section id="risks">
       <div class="sec-head"><span class="num">05</span><h2>Risks &amp; mitigations</h2></div>
       <div class="risks">
