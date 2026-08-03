@@ -69,7 +69,7 @@ def test_env_checker_passes():
     env = gymnasium.make("DodgeHumanoid-v0")
     try:
         assert env.spec.max_episode_steps == 2000
-        check_env(env, skip_render_check=True)
+        check_env(env.unwrapped, skip_render_check=True)
     finally:
         env.close()
 
@@ -371,6 +371,19 @@ def test_despawn_ttl(env):
     assert 3.0 < age <= 3.0 + 0.015 + 1e-9, f"despawn age {age}, ttl 3.0"
 
 
+def test_ttl_derivation(env):
+    """The env's own TTL derivation after a REAL spawn: 1.5 * dist / speed.
+
+    Pins TTL_FACTOR: the hand-built slot in test_despawn_ttl bypasses
+    _spawn_projectile, so only this assertion kills TTL_FACTOR mutations.
+    """
+    env.reset(seed=29)
+    torso_pos = _torso_pos(env)
+    info = env._spawn_projectile(0)
+    expected = 1.5 * np.linalg.norm(info["spawn_point"] - torso_pos) / info["speed"]
+    assert env._slots[0]["ttl"] == pytest.approx(expected, rel=1e-9)
+
+
 def test_despawn_distance(env):
     """A projectile beyond 20 m from the torso is parked on the next step."""
     env.reset(seed=14)
@@ -393,7 +406,8 @@ def test_hit_detected_mid_control_step(env):
     overlap: 0.08 + 0.04 = 0.12) with a 9 m/s velocity carrying it away.
     Traced with this exact setup (seed 17): contacts are present in the
     checks after substeps 1 and 2 of the control step, and the pair is fully
-    separated from substep 3 on (gap 0.141 m and growing) — so a hit check
+    separated from substep 3 on (centre distance 0.141 m, i.e. a surface gap
+    of ~0.021 m over the 0.08 + 0.04 radii, and growing) — so a hit check
     that only runs after the final substep would miss it entirely.
     """
     env.reset(seed=17)
@@ -499,3 +513,125 @@ def test_render_metadata_declared():
         assert metadata["render_fps"] == 67
     finally:
         env.close()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: remaining mutation kills
+# ---------------------------------------------------------------------------
+
+
+def test_upright_band_edges(env):
+    """The +1.0 upright term applies only inside torso z in [1.0, 2.0].
+
+    Out-of-band case (z = 0.6): with no active projectiles, zero action, and
+    no wall/hit event, the step reward must be exactly 0.0 — a widened
+    UPRIGHT_Z_RANGE such as (0.0, 3.0) would emit +1.0 and fail. In-band
+    case (z = 1.2) must yield exactly +1.0. Expected values are computed
+    from the post-step torso z, the same state the env scores.
+    """
+    for z, _ in ((0.6, "below"), (1.2, "inside")):
+        env.reset(seed=31)
+        env.data.qvel[:] = 0.0
+        qadr = _freejoint_qposadr(env.model, "torso")
+        env.data.qpos[qadr + 2] = z
+        mujoco.mj_forward(env.model, env.data)
+
+        _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
+        assert not terminated
+        assert info["hits"] == 0 and info["spawns"] == 0  # t = 0.015 s < 0.5 s
+
+        torso_z = _torso_pos(env)[2]
+        expected = 1.0 if 1.0 <= torso_z <= 2.0 else 0.0
+        if z == 0.6:
+            # 0.015 s of dynamics cannot lift the torso into the band.
+            assert torso_z < 1.0, f"post-step torso z {torso_z} unexpectedly in band"
+        assert reward == pytest.approx(expected, abs=1e-6), (
+            f"z start {z}: reward {reward}, expected {expected} (post-step z {torso_z})"
+        )
+
+
+class _ClampForcingRng(np.random.Generator):
+    """Forced draws: r=8, azimuth=0, elevation=-10 deg, precise, speed 5.
+
+    With the torso at z ~= 1.4 the raw spawn z is 1.4 + 8*sin(-10 deg) ~= 0.01,
+    below the 0.3 floor, so the clamp branch must fire.
+    """
+
+    def __init__(self):
+        super().__init__(np.random.PCG64(0))
+
+    def uniform(self, low=0.0, high=1.0, size=None):
+        assert size is None
+        if low == 8.0 and high == 15.0:  # radius
+            return 8.0
+        if low == 0.0:  # azimuth (0, 2*pi)
+            return 0.0
+        if low == -10.0 and high == 75.0:  # elevation
+            return -10.0
+        if low == 4.0 and high == 9.0:  # speed
+            return 5.0
+        raise AssertionError(f"unexpected uniform({low}, {high})")
+
+    def random(self, size=None):
+        assert size is None
+        return 0.0  # precise aim, no offset draw
+
+    def choice(self, a, size=None, replace=True, p=None):
+        assert size is None
+        return 1  # torso
+
+    def normal(self, loc=0.0, scale=1.0, size=None):
+        raise AssertionError("a precise shot must not draw an aim offset")
+
+
+def test_spawn_z_clamp_preserves_radius(env):
+    """The ratified z-clamp keeps the drawn radius, not a literal z overwrite.
+
+    Forced draws put the raw spawn point at z ~= 0.01 (< 0.3), so the clamp
+    fires. A literal z-clamp mutant leaves the torso distance at ~7.95 m and
+    fails the radius assertion.
+    """
+    env.reset(seed=37)
+    env.np_random = _ClampForcingRng()
+    torso_pos = _torso_pos(env)
+    drawn_radius = 8.0
+    # Self-check that the forced draws really do exercise the clamp branch.
+    assert torso_pos[2] + drawn_radius * math.sin(math.radians(-10.0)) < 0.3
+
+    info = env._spawn_projectile(0)
+    spawn = np.asarray(info["spawn_point"], dtype=np.float64)
+    assert spawn[2] == pytest.approx(0.3, abs=1e-12)
+    dist = np.linalg.norm(spawn - torso_pos)
+    assert dist == pytest.approx(drawn_radius, rel=1e-9)
+
+
+def test_min_approach_sampled_per_substep(env):
+    """min_approach must reflect the closest approach mid-control-step.
+
+    Fly-through at 30 m/s passing 0.3 m to the side of the PELVIS point
+    (below arm reach; the nearest geoms — butt capsule, thigh tops — keep
+    >= 0.04 m surface clearance along the whole path). Per substep the
+    projectile moves 0.09 m; the closest sampled state is
+    sqrt(0.045^2 + 0.3^2) ~= 0.3034 m, while an end-of-step-only sampler
+    would see sqrt(0.225^2 + 0.3^2) = 0.375 m. Asserting < 0.34 separates
+    the two.
+    """
+    env.reset(seed=41)
+    env.data.qvel[:] = 0.0
+    env._spawn_projectile(0)  # active slot; placement overridden below
+
+    pelvis_pos = env.data.xpos[_body_id(env.model, "pelvis")].copy()
+    qadr = _freejoint_qposadr(env.model, "proj0")
+    vadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[qadr : qadr + 3] = pelvis_pos + np.array([-0.225, 0.3, 0.0])
+    env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+    env.data.qvel[vadr : vadr + 3] = np.array([30.0, 0.0, 0.0])
+    env.data.qvel[vadr + 3 : vadr + 6] = 0.0
+
+    _, _, terminated, _, info = env.step(np.zeros(env.model.nu))
+    assert not terminated
+    assert info["hits"] == 0, "fly-through must not touch the humanoid"
+    assert 0.29 < info["min_approach"] < 0.34, (
+        f"min_approach {info['min_approach']}: per-substep sampling expects "
+        "~0.303; an end-of-step-only sampler would report 0.375"
+    )
