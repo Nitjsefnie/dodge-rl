@@ -116,7 +116,10 @@ directly). Active slot state tracked in the env (spawn time, TTL).
   ~ U(1.0, 2.5) s; a spawn is skipped (rescheduled next step) while all 4
   slots are active.
 - Spawn point: radius r ~ U(8, 15) m from current torso xyz; azimuth
-  ~ U(0, 2π); elevation ~ U(-10°, +75°); resulting z clamped to ≥ 0.3 m.
+  ~ U(0, 2π); elevation ~ U(-10°, +75°); if the resulting z would fall below
+  0.3 m the point is raised to z = 0.3 and pushed outward along its azimuth so
+  the torso distance stays exactly the drawn r (a literal z-clamp can shrink
+  the distance below 8 m, violating the spawn-distance invariant).
 - Target link: sampled from
   `[head, torso, pelvis(=root body), left_thigh, right_thigh, left_shin,
   right_shin]` with weights `[0.15, 0.30, 0.20, 0.10, 0.10, 0.075, 0.075]`;
@@ -130,7 +133,9 @@ directly). Active slot state tracked in the env (spawn time, TTL).
 
 **Observation** (`float64` Box): humanoid `qpos[2:]` (root x,y excluded) +
 full humanoid `qvel` + per-slot block `[active_flag, rel_pos(3), rel_vel(3)]`
-× 4 slots (relative to torso xpos; inactive slots all-zero), slots ordered by
+× 4 slots (rel_pos = projectile position − torso xpos; rel_vel = projectile
+velocity − root translational velocity, i.e. both torso-relative; inactive
+slots all-zero), slots ordered by
 time-to-closest-approach ascending, inactive slots last. Projectile qpos/qvel
 are excluded from the humanoid section (mask by joint address, don't assume
 ordering).
