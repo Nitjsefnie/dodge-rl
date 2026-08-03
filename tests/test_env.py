@@ -3,9 +3,15 @@
 Covers the Task 2 spec: registration + env_checker, spawn geometry, straight
 flight, precise-aim geometry, wall termination, hit handling, determinism,
 observation slot ordering, and an anatomy guard on the underlying model.
+
+Fix round 1 added: aim-point pinning, exact reward decomposition, spawn
+schedule bounds, despawn rules, per-substep hit detection, rel_vel frame
+pinning, target-weight statistics, render metadata, and reset info keys.
 """
 
 import math
+import warnings
+from collections import Counter
 from pathlib import Path
 
 import mujoco
@@ -54,11 +60,16 @@ def env():
 
 
 def test_env_checker_passes():
-    """The registered env passes gymnasium's compliance checker."""
+    """The registered env passes gymnasium's compliance checker.
+
+    skip_render_check=True: the render check instantiates every declared
+    render_mode (including "human"), which aborts on this headless box
+    (glfw get_video_mode). Rendering backends are Task 4's job.
+    """
     env = gymnasium.make("DodgeHumanoid-v0")
     try:
         assert env.spec.max_episode_steps == 2000
-        check_env(env)
+        check_env(env, skip_render_check=True)
     finally:
         env.close()
 
@@ -124,6 +135,10 @@ def test_precise_aim_geometry(env):
     spawn = np.asarray(info["spawn_point"], dtype=np.float64)
     aim = np.asarray(info["aim_point"], dtype=np.float64)
 
+    # Aim pinning: a precise shot must aim exactly at the targeted link's
+    # xpos, not at some self-reported point. _MidpointRng targets "torso".
+    np.testing.assert_allclose(aim, _torso_pos(env), atol=1e-9)
+
     vadr = _freejoint_dofadr(env.model, "proj0")
     vel = env.data.qvel[vadr : vadr + 3].copy()
 
@@ -134,7 +149,13 @@ def test_precise_aim_geometry(env):
 
 def test_wall_termination(env):
     """Torso beyond |x| > 1.5 terminates with reward <= -100 + step bounds."""
-    env.reset(seed=1)
+    _, reset_info = env.reset(seed=1)
+    assert reset_info == {
+        "hits": 0,
+        "wall_death": False,
+        "spawns": 0,
+        "min_approach": -1.0,
+    }
     qadr = _freejoint_qposadr(env.model, "torso")
     env.data.qpos[qadr] = 1.6
     env.data.qvel[:] = 0.0
@@ -238,3 +259,243 @@ def test_anatomy_guard(env):
     # Shape guards tying the observation/action spaces to the stock humanoid.
     assert env.action_space.shape == (17,)
     assert env.observation_space.shape == (OBS_LEN,)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: mutation-pinning and env-gap tests
+# ---------------------------------------------------------------------------
+
+
+def test_reward_decomposition_exact(env):
+    """One known step: reward == upright + proximity + ctrl, exactly.
+
+    Pins the sign and all three coefficients at once. d is recomputed from
+    the post-step state against the same {head, torso, pelvis} point set the
+    env uses (head is a geom, the others are bodies).
+    """
+    env.reset(seed=11)
+    env.data.qvel[:] = 0.0
+    env._spawn_projectile(0)  # proper slot activation; placement overridden
+
+    torso_pos = _torso_pos(env)
+    qadr = _freejoint_qposadr(env.model, "proj0")
+    vadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[qadr : qadr + 3] = torso_pos + np.array([0.6, 0.0, 0.0])
+    env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+    env.data.qvel[vadr : vadr + 6] = 0.0
+
+    action = 0.3 * np.ones(env.model.nu)
+    _, reward, terminated, _, _ = env.step(action)
+    assert not terminated
+
+    # Hand-compute from the post-step state (the env scores post-substep).
+    proj_pos = env.data.qpos[qadr : qadr + 3].copy()
+    head_pos = env.data.geom_xpos[
+        mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "head")
+    ]
+    points = [_torso_pos(env), head_pos, env.data.xpos[_body_id(env.model, "pelvis")]]
+    d = min(np.linalg.norm(proj_pos - p) for p in points)
+
+    expected = 0.0
+    torso_z = _torso_pos(env)[2]
+    if 1.0 <= torso_z <= 2.0:
+        expected += 1.0
+    expected -= 0.5 * max(0.0, 1.2 - d) ** 2
+    expected -= 0.05 * float(action @ action)
+    assert reward == pytest.approx(expected, abs=1e-6)
+
+
+def test_spawn_schedule(env):
+    """First spawn at t in (0.495, 0.515]; inter-spawn gaps within U(1.0, 2.5).
+
+    Gaps are measured on the 0.015 s control grid, so the upper bound admits
+    one control step of quantization; gaps spanning a full-slot stall are
+    exempt from the upper bound (the spawn correctly stayed pending).
+    """
+    env.reset(seed=5)
+    action = np.zeros(env.model.nu)
+    spawn_times = []
+    spawn_step_idx = []
+    full_house_steps = set()
+    prev_spawns = 0
+    for step_i in range(700):  # 10.5 s
+        _, _, terminated, _, info = env.step(action)
+        if all(s["active"] for s in env._slots):
+            full_house_steps.add(step_i)
+        if info["spawns"] > prev_spawns:
+            spawn_times.append(env.data.time)
+            spawn_step_idx.append(step_i)
+            prev_spawns = info["spawns"]
+        if terminated or len(spawn_times) >= 6:
+            break
+
+    assert len(spawn_times) >= 4, f"only {len(spawn_times)} spawns observed"
+    assert 0.495 < spawn_times[0] <= 0.515, f"first spawn at t={spawn_times[0]}"
+    for i in range(1, len(spawn_times)):
+        gap = spawn_times[i] - spawn_times[i - 1]
+        assert gap >= 1.0 - 1e-9, f"gap {gap} below the 1.0 s draw floor"
+        stalled = any(
+            s in full_house_steps
+            for s in range(spawn_step_idx[i - 1], spawn_step_idx[i] + 1)
+        )
+        if not stalled:
+            assert gap <= 2.5 + 0.0151, f"gap {gap} above the 2.5 s draw ceiling"
+
+
+def test_despawn_ttl(env):
+    """A projectile is parked once its age exceeds 1.5 * distance / speed.
+
+    Known geometry: 10 m from the torso, 5 m/s perpendicular to the torso
+    direction -> ttl = 3.0 s, peak torso distance sqrt(100+225) = 18 m < 20,
+    so only the TTL rule can fire.
+    """
+    env.reset(seed=13)
+    env.data.qvel[:] = 0.0
+    torso_pos = _torso_pos(env)
+    qadr = _freejoint_qposadr(env.model, "proj0")
+    vadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[qadr : qadr + 3] = torso_pos + np.array([10.0, 0.0, 0.0])
+    env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+    env.data.qvel[vadr : vadr + 3] = np.array([0.0, 5.0, 0.0])
+    env.data.qvel[vadr + 3 : vadr + 6] = 0.0
+    env._slots[0] = {"active": True, "spawn_time": env.data.time, "ttl": 1.5 * 10.0 / 5.0}
+
+    action = np.zeros(env.model.nu)
+    t0 = env.data.time
+    steps = 0
+    while env._slots[0]["active"] and steps < 400:
+        env.step(action)
+        steps += 1
+    assert not env._slots[0]["active"], "projectile never despawned"
+    age = env.data.time - t0
+    assert 3.0 < age <= 3.0 + 0.015 + 1e-9, f"despawn age {age}, ttl 3.0"
+
+
+def test_despawn_distance(env):
+    """A projectile beyond 20 m from the torso is parked on the next step."""
+    env.reset(seed=14)
+    env._spawn_projectile(0)  # active slot; placement overridden below
+    torso_pos = _torso_pos(env)
+    qadr = _freejoint_qposadr(env.model, "proj0")
+    vadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[qadr : qadr + 3] = torso_pos + np.array([25.0, 0.0, 0.0])
+    env.data.qvel[vadr : vadr + 6] = 0.0
+
+    env.step(np.zeros(env.model.nu))
+    assert not env._slots[0]["active"], "projectile > 20 m away must despawn"
+    assert env.data.qpos[qadr + 2] == pytest.approx(-10.0)  # parked
+
+
+def test_hit_detected_mid_control_step(env):
+    """A hit visible only in the early substeps must still score -50.
+
+    The projectile starts 0.06 m from the right_hand centre (surfaces
+    overlap: 0.08 + 0.04 = 0.12) with a 9 m/s velocity carrying it away.
+    Traced with this exact setup (seed 17): contacts are present in the
+    checks after substeps 1 and 2 of the control step, and the pair is fully
+    separated from substep 3 on (gap 0.141 m and growing) — so a hit check
+    that only runs after the final substep would miss it entirely.
+    """
+    env.reset(seed=17)
+    env.data.qvel[:] = 0.0
+    env._spawn_projectile(0)  # active slot; placement overridden below
+
+    hand_gid = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "right_hand")
+    hand_pos = env.data.geom_xpos[hand_gid].copy()
+    out = hand_pos - _torso_pos(env)
+    out /= np.linalg.norm(out)
+
+    qadr = _freejoint_qposadr(env.model, "proj0")
+    vadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[qadr : qadr + 3] = hand_pos + 0.06 * out
+    env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+    env.data.qvel[vadr : vadr + 3] = 9.0 * out
+    env.data.qvel[vadr + 3 : vadr + 6] = 0.0
+
+    _, reward, terminated, _, info = env.step(np.zeros(env.model.nu))
+    assert info["hits"] == 1, "contact during early substeps was missed"
+    assert reward <= -49.0 + 1e-9
+    assert not terminated
+    assert not env._slots[0]["active"]
+
+
+def test_obs_rel_vel_is_torso_relative(env):
+    """obs rel_vel == projectile velocity minus root translational velocity."""
+    env.reset(seed=19)
+    env.data.qvel[:] = 0.0
+    root_vadr = _freejoint_dofadr(env.model, "torso")
+    torso_vel = np.array([0.8, -0.5, 0.3])
+    env.data.qvel[root_vadr : root_vadr + 3] = torso_vel
+
+    env._spawn_projectile(0)  # active slot; placement overridden below
+    torso_pos = _torso_pos(env)
+    proj_vel = np.array([1.0, 2.0, 3.0])
+    qadr = _freejoint_qposadr(env.model, "proj0")
+    vadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[qadr : qadr + 3] = torso_pos + np.array([4.0, 0.0, 0.0])
+    env.data.qvel[vadr : vadr + 3] = proj_vel
+
+    obs = env._get_obs()
+    block = obs[HUM_OBS_LEN : HUM_OBS_LEN + SLOT_BLOCK_LEN]
+    assert block[0] == 1.0
+    np.testing.assert_allclose(block[1:4], [4.0, 0.0, 0.0], atol=1e-12)
+    np.testing.assert_allclose(block[4:7], proj_vel - torso_vel, atol=1e-12)
+
+
+class _RecordingRng:
+    """Wraps a Generator, recording every choice() draw; passes the rest through."""
+
+    def __init__(self, gen):
+        self._gen = gen
+        self.choices = []
+
+    def choice(self, a, size=None, replace=True, p=None):
+        value = self._gen.choice(a, size=size, replace=replace, p=p)
+        self.choices.append(int(value))
+        return value
+
+    def __getattr__(self, name):
+        return getattr(self._gen, name)
+
+
+def test_target_weights(env):
+    """Empirical target frequencies match the spec weights (seeded).
+
+    Spec order: [head, torso, pelvis, left_thigh, right_thigh, left_shin,
+    right_shin] with weights [0.15, 0.30, 0.20, 0.10, 0.10, 0.075, 0.075].
+    """
+    env.reset(seed=23)
+    recorder = _RecordingRng(env.np_random)
+    env.np_random = recorder
+    target_order = [
+        "head", "torso", "pelvis",
+        "left_thigh", "right_thigh", "left_shin", "right_shin",
+    ]
+    n = 800
+    for _ in range(n):
+        env._park(0)
+        env._spawn_projectile(0)
+    assert len(recorder.choices) == n
+    counts = Counter(target_order[i] for i in recorder.choices)
+    torso_freq = counts["torso"] / n
+    head_freq = counts["head"] / n
+    assert abs(torso_freq - 0.30) <= 0.08, f"torso frequency {torso_freq}"
+    assert abs(head_freq - 0.15) <= 0.06, f"head frequency {head_freq}"
+
+
+def test_render_metadata_declared():
+    """gym.make(..., render_mode="rgb_array") constructs without render warnings.
+
+    Does not call render(): rendering backends are Task 4's job.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        env = gymnasium.make("DodgeHumanoid-v0", render_mode="rgb_array")
+    try:
+        render_warnings = [w for w in caught if "render" in str(w.message).lower()]
+        assert not render_warnings, [str(w.message) for w in render_warnings]
+        metadata = env.unwrapped.metadata
+        assert set(metadata["render_modes"]) == {"human", "rgb_array", "depth_array"}
+        assert metadata["render_fps"] == 67
+    finally:
+        env.close()

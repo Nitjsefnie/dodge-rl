@@ -20,6 +20,9 @@ Reward per control step:
         episode continues)
     -100 and terminated when torso |x| > 1.5 or |y| > 1.5
     -0.05 * ||action||^2
+
+info["min_approach"] uses -1.0 as a sentinel while no projectile has been
+active yet this episode (a real approach distance is always >= 0).
 """
 
 from pathlib import Path
@@ -64,6 +67,11 @@ INIT_NOISE = 0.01  # uniform +- noise on humanoid qpos/qvel at reset
 class DodgeEnv(MujocoEnv):
     """Projectile-dodging humanoid. See module docstring for the spec."""
 
+    metadata = {
+        "render_modes": ["human", "rgb_array", "depth_array"],
+        "render_fps": 67,  # round(1 / dt), dt = 0.015 s
+    }
+
     def __init__(self, xml_file=None, frame_skip=FRAME_SKIP, **kwargs):
         xml_file = xml_file or str(XML_PATH)
         # Resolve model-derived indices once from a probe model so the
@@ -79,9 +87,6 @@ class DodgeEnv(MujocoEnv):
             **kwargs,
         )
         self._resolve_indices()
-
-        ctrlrange = self.model.actuator_ctrlrange
-        self.action_space = Box(low=ctrlrange[:, 0], high=ctrlrange[:, 1], dtype=np.float32)
 
         self._slots = [self._fresh_slot() for _ in range(NUM_SLOTS)]
         self._init_episode_state()
@@ -272,6 +277,20 @@ class DodgeEnv(MujocoEnv):
     # Hits, despawns
     # ------------------------------------------------------------------
 
+    def _min_approach_distance(self, slot):
+        pos = self._proj_pos(slot)
+        return min(np.linalg.norm(pos - self._point_pos(n)) for n in PROXIMITY_NAMES)
+
+    def _sample_min_approach(self):
+        """Track the closest any active projectile got to head/torso/pelvis.
+
+        Sampled after every physics substep so near-misses between control
+        steps are not understated.
+        """
+        for slot in range(NUM_SLOTS):
+            if self._slots[slot]["active"]:
+                self._min_approach = min(self._min_approach, self._min_approach_distance(slot))
+
     def _register_hits(self):
         """Detect projectile/humanoid contacts after one physics substep."""
         if not any(s["active"] for s in self._slots):
@@ -289,9 +308,6 @@ class DodgeEnv(MujocoEnv):
         for slot in hit_slots:
             if not self._slots[slot]["active"]:
                 continue
-            pos = self._proj_pos(slot)
-            d = min(np.linalg.norm(pos - self._point_pos(n)) for n in PROXIMITY_NAMES)
-            self._min_approach = min(self._min_approach, d)
             self._hits += 1
             self._step_hits += 1
             self._park(slot)
@@ -353,6 +369,7 @@ class DodgeEnv(MujocoEnv):
         self._step_hits = 0
         for _ in range(n_frames):
             mujoco.mj_step(self.model, self.data)
+            self._sample_min_approach()
             self._register_hits()
 
     def step(self, action):
@@ -374,8 +391,7 @@ class DodgeEnv(MujocoEnv):
         for slot in range(NUM_SLOTS):
             if not self._slots[slot]["active"]:
                 continue
-            pos = self._proj_pos(slot)
-            d = min(np.linalg.norm(pos - self._point_pos(n)) for n in PROXIMITY_NAMES)
+            d = self._min_approach_distance(slot)
             self._min_approach = min(self._min_approach, d)
             reward -= PROXIMITY_WEIGHT * max(0.0, PROXIMITY_RADIUS - d) ** 2
 
@@ -385,13 +401,19 @@ class DodgeEnv(MujocoEnv):
             self._wall_death = True
         reward -= CTRL_COST_WEIGHT * (action @ action)
 
-        info = {
+        return self._get_obs(), float(reward), terminated, False, self._info()
+
+    def _info(self):
+        return {
             "hits": self._hits,
             "wall_death": self._wall_death,
             "spawns": self._spawns,
-            "min_approach": self._min_approach,
+            # Sentinel: -1.0 while no projectile has been active this episode.
+            "min_approach": self._min_approach if np.isfinite(self._min_approach) else -1.0,
         }
-        return self._get_obs(), float(reward), terminated, False, info
+
+    def _get_reset_info(self):
+        return self._info()
 
     def reset_model(self):
         qpos = self.init_qpos.copy()
