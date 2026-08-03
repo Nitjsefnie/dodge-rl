@@ -180,7 +180,14 @@ ordering).
 
 ## Task 3: Training script — PPO on SubprocVecEnv
 
-**Files:** `train.py`, `tests/test_train_smoke.py`.
+**Files:** `train.py`, `pyproject.toml`, `tests/test_train_smoke.py`.
+
+- Minimal `pyproject.toml` (setuptools backend, package `dodge_rl`), then
+  `nice -n 10 .venv/bin/pip install -e .` and regenerate `requirements.txt`
+  via `pip freeze --local --exclude-editable`. This makes `dodge_rl`
+  importable regardless of CWD — SubprocVecEnv worker processes and later
+  eval tooling need it (Task 2 review demonstrated script-by-absolute-path
+  fails without it).
 
 - `train.py` (argparse): `--total-steps` (default 20_000_000), `--n-envs`
   (default 6), `--seed` (default 1), `--run-name` (default
