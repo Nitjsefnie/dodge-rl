@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""PPO training script for DodgeHumanoid-v0."""
+
+import argparse
+import sys
+from collections import deque
+from pathlib import Path
+
+import gymnasium as gym
+import torch
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+
+
+def make_env_factory(seed: int, rank: int):
+    """Return an env factory for SubprocVecEnv worker ``rank``."""
+
+    def _init():
+        # Editable install guarantees this import works from any CWD.
+        import dodge_rl  # noqa: F401  registers DodgeHumanoid-v0
+
+        env = gym.make("DodgeHumanoid-v0")
+        env.reset(seed=seed + rank)
+        return env
+
+    return _init
+
+
+class ProgressCallback(BaseCallback):
+    """Print concise progress every 50_000 total steps (nearest rollout boundary)."""
+
+    PRINT_INTERVAL = 50_000
+    LOOKBACK = 100
+
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self._next_print = self.PRINT_INTERVAL
+        self._episodes: deque[dict] = deque(maxlen=self.LOOKBACK)
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos") or []
+        for info in infos:
+            ep = info.get("episode")
+            if ep is not None:
+                self._episodes.append(ep)
+
+        if self.num_timesteps >= self._next_print:
+            self._print_progress()
+            self._next_print += self.PRINT_INTERVAL
+        return True
+
+    def _print_progress(self) -> None:
+        if not self._episodes:
+            print(f"Step {self.num_timesteps}: no episodes yet")
+            return
+
+        episodes = list(self._episodes)
+        mean_r = sum(e["r"] for e in episodes) / len(episodes)
+        mean_l = sum(e["l"] for e in episodes) / len(episodes)
+        mean_hits = sum(e.get("hits", 0) for e in episodes) / len(episodes)
+        wall_deaths = sum(bool(e.get("wall_death", False)) for e in episodes)
+        wall_frac = wall_deaths / len(episodes)
+        print(
+            f"Step {self.num_timesteps}: reward={mean_r:.3f}, "
+            f"len={mean_l:.1f}, hits={mean_hits:.2f}, wall_death={wall_frac:.3f}"
+        )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train PPO on DodgeHumanoid-v0")
+    parser.add_argument("--total-steps", type=int, default=20_000_000)
+    parser.add_argument("--n-envs", type=int, default=6)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--out-dir", type=str, default="runs/")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    torch.set_num_threads(2)
+
+    total_steps = args.total_steps
+    n_envs = args.n_envs
+    seed = args.seed
+    run_name = args.run_name or f"ppo-{seed}-{total_steps}"
+    run_dir = Path(args.out_dir) / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    monitor_csv = run_dir / "monitor.csv"
+    if monitor_csv.exists() and args.resume is None:
+        print(f"Refusing to clobber existing run: {run_dir}", file=sys.stderr)
+        sys.exit(2)
+
+    env_fns = [make_env_factory(seed, i) for i in range(n_envs)]
+    vec_env = VecMonitor(
+        SubprocVecEnv(env_fns),
+        filename=str(monitor_csv),
+        info_keywords=("hits", "wall_death", "spawns", "min_approach"),
+    )
+
+    if args.resume:
+        model = PPO.load(args.resume, env=vec_env)
+    else:
+        model = PPO(
+            "MlpPolicy",
+            vec_env,
+            policy_kwargs=dict(net_arch=[256, 256]),
+            n_steps=2048,
+            batch_size=4096,
+            learning_rate=3e-4,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.0,
+            device="cpu",
+            seed=seed,
+            verbose=0,
+        )
+
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(1_000_000 // n_envs, 1),
+        save_path=str(run_dir),
+        name_prefix="ckpt",
+    )
+    progress_callback = ProgressCallback()
+
+    interrupted = False
+    try:
+        model.learn(
+            total_timesteps=total_steps,
+            callback=[checkpoint_callback, progress_callback],
+            reset_num_timesteps=(args.resume is None),
+        )
+    except (KeyboardInterrupt, SystemExit):
+        interrupted = True
+        raise
+    finally:
+        if interrupted:
+            try:
+                model.save(run_dir / "interrupt.zip")
+            except Exception as exc:  # pragma: no cover
+                print(f"Failed to save interrupt.zip: {exc}", file=sys.stderr)
+        vec_env.close()
+
+    if not interrupted:
+        model.save(run_dir / "final.zip")
+
+
+if __name__ == "__main__":
+    main()

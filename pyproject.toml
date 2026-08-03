@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dodge-rl"
+version = "0.1.0"
+description = "PPO humanoid projectile-dodging environments"
+
+[tool.setuptools]
+packages = ["dodge_rl"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: slow integration tests",
+]
