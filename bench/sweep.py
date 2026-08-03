@@ -84,6 +84,8 @@ VARIANTS: dict[str, dict[str, str]] = {
     "envs12": {_N_ENVS: "12"},
     "envs16": {_N_ENVS: "16"},
     "envs24": {_N_ENVS: "24"},
+    "envs32": {_N_ENVS: "32"},
+    "envs48": {_N_ENVS: "48"},
 }
 
 DEFAULT_VARIANTS = "threads1,threads2,threads1-passive,threads2-passive"
