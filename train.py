@@ -5,6 +5,7 @@ import argparse
 import os
 import signal
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -84,6 +85,8 @@ class ProgressCallback(BaseCallback):
         super().__init__(verbose)
         self._next_print: int | None = None
         self._episodes: deque[dict] = deque(maxlen=self.LOOKBACK)
+        self._mark_time: float | None = None
+        self._mark_steps: int = 0
 
     def _on_training_start(self) -> None:
         # Avoid a torrent of progress lines when resuming from N steps:
@@ -91,6 +94,11 @@ class ProgressCallback(BaseCallback):
         # must not reprint it, and 0 rounds up to the first real boundary).
         ts = self.model.num_timesteps
         self._next_print = ((ts // self.PRINT_INTERVAL) + 1) * self.PRINT_INTERVAL
+        # Throughput is measured between prints rather than since start, so a
+        # changing machine load shows up now instead of being averaged away
+        # into a stale ETA. Worker boot is excluded by marking here.
+        self._mark_time = time.perf_counter()
+        self._mark_steps = ts
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos") or []
@@ -104,9 +112,30 @@ class ProgressCallback(BaseCallback):
             self._next_print += self.PRINT_INTERVAL
         return True
 
+    def _rate_and_eta(self) -> str:
+        """Steps/s since the previous print, and ETA at that rate.
+
+        ``_total_timesteps`` is the target SB3 actually computed, which on a
+        resume already includes the steps carried over from the checkpoint —
+        so this reports time to the real finish line, not to the increment
+        passed on the command line.
+        """
+        now = time.perf_counter()
+        elapsed = now - self._mark_time if self._mark_time is not None else 0.0
+        done = self.num_timesteps - self._mark_steps
+        self._mark_time, self._mark_steps = now, self.num_timesteps
+        if elapsed <= 0 or done <= 0:
+            return "speed=n/a, eta=n/a"
+
+        rate = done / elapsed
+        remaining = max(0, getattr(self.model, "_total_timesteps", 0) - self.num_timesteps)
+        eta_h = remaining / rate / 3600.0
+        return f"speed={rate:.0f}/s, eta={eta_h:.1f}h"
+
     def _print_progress(self) -> None:
+        pace = self._rate_and_eta()
         if not self._episodes:
-            print(f"Step {self.num_timesteps}: no episodes yet")
+            print(f"Step {self.num_timesteps}: no episodes yet, {pace}")
             return
 
         episodes = list(self._episodes)
@@ -123,7 +152,7 @@ class ProgressCallback(BaseCallback):
         print(
             f"Step {self.num_timesteps}: reward={mean_r:.3f}, "
             f"len={mean_l:.1f}, dodged={mean_dodged:.2f}, hits={mean_hits:.2f}, "
-            f"fall_death={fall_frac:.3f}, wall_death={wall_frac:.3f}"
+            f"fall_death={fall_frac:.3f}, wall_death={wall_frac:.3f}, {pace}"
         )
 
 
@@ -206,6 +235,31 @@ def main() -> None:
                 model.save(run_dir / "interrupt.zip")
             except Exception as exc:  # pragma: no cover
                 print(f"Failed to save interrupt.zip: {exc}", file=sys.stderr)
+
+            # Shutting down SubprocVecEnv can block forever on SIGTERM. The
+            # SystemExit lands wherever the interpreter happens to be — often
+            # between step_async and step_wait — and close() then waits on a
+            # worker pipe that will never be written. Observed live: the save
+            # completed instantly, then the process sat in stop-sigterm for
+            # the full 180 s TimeoutStopSec and was SIGKILLed, which is why
+            # every interrupt reported `failed` and took three minutes.
+            #
+            # The model is already on disk here, so an unclean unwind costs
+            # nothing. Give close() a bounded chance to tidy up, then leave.
+            # systemd reaps the workers via KillMode=mixed once we are gone.
+            closer = threading.Thread(target=vec_env.close, daemon=True)
+            closer.start()
+            closer.join(timeout=10.0)
+            if closer.is_alive():
+                print(
+                    "vec_env.close() did not return within 10s; exiting without it "
+                    "(interrupt.zip is already written)",
+                    file=sys.stderr,
+                )
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(143)
+
         vec_env.close()
 
     if not interrupted:
