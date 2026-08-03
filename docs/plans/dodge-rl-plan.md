@@ -132,7 +132,10 @@ directly). Active slot state tracked in the env (spawn time, TTL).
   projectile is > 20 m from the torso, or on hit.
 
 **Observation** (`float64` Box): humanoid `qpos[2:]` (root x,y excluded) +
-full humanoid `qvel` + per-slot block `[active_flag, rel_pos(3), rel_vel(3)]`
+full humanoid `qvel` + wall block `[1.5−x, 1.5+x, 1.5−y, 1.5+y]` (from torso
+xpos; distance to each of the four virtual walls, positive inside the arena,
+crossing zero exactly at the lethal boundary) +
+per-slot block `[active_flag, rel_pos(3), rel_vel(3)]`
 × 4 slots (rel_pos = projectile position − torso xpos; rel_vel = projectile
 velocity − root translational velocity, i.e. both torso-relative; inactive
 slots all-zero), slots ordered by

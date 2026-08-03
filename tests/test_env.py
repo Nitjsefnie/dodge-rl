@@ -26,10 +26,13 @@ from dodge_rl.dodge_env import DodgeEnv
 XML_PATH = str(Path(__file__).resolve().parents[1] / "assets" / "dodge_humanoid.xml")
 
 # Observation layout: humanoid qpos (24) minus root x,y -> 22, plus full
-# humanoid qvel (23) -> 45, then 4 slot blocks of 7.
+# humanoid qvel (23) -> 45, then the 4-element wall block, then 4 slot blocks
+# of 7.
 HUM_OBS_LEN = 45
+WALL_OBS_LEN = 4
 SLOT_BLOCK_LEN = 7
-OBS_LEN = HUM_OBS_LEN + 4 * SLOT_BLOCK_LEN
+OBS_LEN = HUM_OBS_LEN + WALL_OBS_LEN + 4 * SLOT_BLOCK_LEN
+SLOTS_START = HUM_OBS_LEN + WALL_OBS_LEN
 
 
 def _body_id(model, name):
@@ -239,7 +242,7 @@ def test_slot_ordering(env):
 
     obs = env._get_obs()
     assert obs.shape == (OBS_LEN,)
-    blocks = obs[HUM_OBS_LEN:].reshape(4, SLOT_BLOCK_LEN)
+    blocks = obs[SLOTS_START:].reshape(4, SLOT_BLOCK_LEN)
 
     assert blocks[0, 0] == 1.0 and blocks[1, 0] == 1.0
     np.testing.assert_allclose(blocks[0, 1:4], placements[1][0] - torso_pos, atol=1e-12)
@@ -247,6 +250,45 @@ def test_slot_ordering(env):
     np.testing.assert_allclose(blocks[1, 1:4], placements[0][0] - torso_pos, atol=1e-12)
     np.testing.assert_allclose(blocks[1, 4:7], placements[0][1], atol=1e-12)
     assert np.all(blocks[2:] == 0.0), "inactive slots must be all-zero blocks"
+
+
+def test_wall_block_reports_signed_distance_to_each_wall(env):
+    """The wall block tracks torso x,y and crosses zero exactly at the boundary.
+
+    Pins the sign convention, not just the arithmetic: an absolute-value
+    encoding (1.5 - |x|) would pass a magnitude-only check while leaving the
+    policy unable to tell which way to run, which is the whole point of the
+    feature.
+    """
+    env.reset(seed=3)
+    qadr = _freejoint_qposadr(env.model, "torso")
+
+    for x, y in [(0.0, 0.0), (1.2, -0.4), (-1.45, 1.45)]:
+        env.data.qpos[qadr] = x
+        env.data.qpos[qadr + 1] = y
+        mujoco.mj_forward(env.model, env.data)
+
+        wall = env._get_obs()[HUM_OBS_LEN : HUM_OBS_LEN + WALL_OBS_LEN]
+        tx, ty = _torso_pos(env)[:2]
+        np.testing.assert_allclose(
+            wall, [1.5 - tx, 1.5 + tx, 1.5 - ty, 1.5 + ty], atol=1e-12
+        )
+        assert np.all(wall > 0.0), "inside the arena every wall distance is positive"
+
+    # Opposite walls must disagree once the torso is off-centre, which is what
+    # distinguishes the signed encoding from the symmetric one.
+    env.data.qpos[qadr] = 1.0
+    env.data.qpos[qadr + 1] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+    wall = env._get_obs()[HUM_OBS_LEN : HUM_OBS_LEN + WALL_OBS_LEN]
+    assert wall[0] < wall[1], "+x wall must read nearer than -x wall at x = +1.0"
+
+    # At the lethal boundary the corresponding entry is exactly zero: the sign
+    # flip is the termination condition, expressed in the observation.
+    env.data.qpos[qadr] = 1.5
+    mujoco.mj_forward(env.model, env.data)
+    wall = env._get_obs()[HUM_OBS_LEN : HUM_OBS_LEN + WALL_OBS_LEN]
+    assert wall[0] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_anatomy_guard(env):
@@ -450,7 +492,7 @@ def test_obs_rel_vel_is_torso_relative(env):
     env.data.qvel[vadr : vadr + 3] = proj_vel
 
     obs = env._get_obs()
-    block = obs[HUM_OBS_LEN : HUM_OBS_LEN + SLOT_BLOCK_LEN]
+    block = obs[SLOTS_START : SLOTS_START + SLOT_BLOCK_LEN]
     assert block[0] == 1.0
     np.testing.assert_allclose(block[1:4], [4.0, 0.0, 0.0], atol=1e-12)
     np.testing.assert_allclose(block[4:7], proj_vel - torso_vel, atol=1e-12)

@@ -57,6 +57,12 @@ PROXIMITY_RADIUS = 1.2
 HIT_PENALTY = 50.0
 WALL_PENALTY = 100.0
 WALL_LIMIT = 1.5
+
+# Observation block reporting distance to each of the four virtual walls, in
+# the order (+x, -x, +y, -y). Root x,y are excluded from the humanoid section
+# by design, which left the arena — the only terminal failure mode — entirely
+# invisible to the policy while it was ending 24-33% of episodes.
+WALL_OBS_LEN = 4
 UPRIGHT_Z_RANGE = (1.0, 2.0)
 UPRIGHT_REWARD = 1.0
 CTRL_COST_WEIGHT = 0.05
@@ -132,7 +138,7 @@ class DodgeEnv(MujocoEnv):
             is_free = model.jnt_type[jid] == mujoco.mjtJoint.mjJNT_FREE
             hum_nq += 7 if is_free else 1
             hum_nv += 6 if is_free else 1
-        return (hum_nq - 2) + hum_nv + NUM_SLOTS * 7
+        return (hum_nq - 2) + hum_nv + WALL_OBS_LEN + NUM_SLOTS * 7
 
     def _resolve_indices(self):
         model = self.model
@@ -371,6 +377,19 @@ class DodgeEnv(MujocoEnv):
 
         active.sort(key=time_to_closest_approach)
 
+        # Signed distance to each wall, not WALL_LIMIT - |x|. The absolute-value
+        # form is symmetric in x, so it tells the policy how close the wall is
+        # but not which way to run from it — it would have to infer the sign
+        # from several steps of motion, which is the blindness this is meant to
+        # remove. Each entry is positive inside the arena and crosses zero
+        # exactly where the episode terminates.
+        wall = np.array([
+            WALL_LIMIT - torso_pos[0],
+            WALL_LIMIT + torso_pos[0],
+            WALL_LIMIT - torso_pos[1],
+            WALL_LIMIT + torso_pos[1],
+        ])
+
         blocks = []
         for slot in active:
             rel, rel_vel = rels[slot]
@@ -378,7 +397,7 @@ class DodgeEnv(MujocoEnv):
         for _ in range(NUM_SLOTS - len(active)):
             blocks.append(np.zeros(7))
 
-        return np.concatenate([hum_qpos, hum_qvel] + blocks)
+        return np.concatenate([hum_qpos, hum_qvel, wall] + blocks)
 
     # ------------------------------------------------------------------
     # Gymnasium API
