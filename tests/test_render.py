@@ -33,10 +33,15 @@ def test_render_random_30_frames(tmp_path):
         f"render_video.py failed (exit {result.returncode})\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+    assert "backend:" in result.stdout, (
+        f"missing backend line in stdout:\n{result.stdout}"
+    )
     assert out.is_file(), f"output not written: {out}"
     assert out.stat().st_size > 10 * 1024, (
         f"output too small: {out.stat().st_size} bytes"
     )
     with imageio.get_reader(out) as reader:
         n_frames = reader.count_frames()
+        frame = reader.get_data(0)
     assert n_frames >= 30, f"expected >= 30 frames, got {n_frames}"
+    assert frame.max() > frame.min(), "frame 0 is degenerate (uniform color)"

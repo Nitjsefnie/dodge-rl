@@ -26,7 +26,10 @@ def parse_args(argv=None):
                         help="Evaluate a uniform random policy.")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.episodes < 1:
+        parser.error("--episodes must be >= 1")
+    return args
 
 
 def main(argv=None):
@@ -81,7 +84,7 @@ def main(argv=None):
     lengths = np.asarray(lengths, dtype=np.float64)
     hits_arr = np.asarray(hits_list, dtype=np.float64)
     wall_frac = float(np.mean(wall_deaths)) if wall_deaths else 0.0
-    min_app_mean = float(np.mean(min_approaches)) if min_approaches else float("nan")
+    min_app_str = f"{np.mean(min_approaches):.3f}" if min_approaches else "n/a"
 
     print(f"Policy:              {args.checkpoint if args.checkpoint else 'random'}")
     print(f"Episodes:            {args.episodes}  (seed {args.seed})")
@@ -90,7 +93,7 @@ def main(argv=None):
     print(f"{'episode length':<30}{lengths.mean():>12.1f}{lengths.std():>12.1f}")
     print(f"{'hits / episode':<30}{hits_arr.mean():>12.3f}{hits_arr.std():>12.3f}")
     print(f"{'wall-death fraction':<30}{wall_frac:>12.3f}{'-':>12}")
-    print(f"{'min_approach (projectile eps)':<30}{min_app_mean:>12.3f}{'-':>12}")
+    print(f"{'min_approach (projectile eps)':<30}{min_app_str:>12}{'-':>12}")
     print(f"{'episodes with no projectile':<30}{no_projectile:>12d}{'-':>12}")
     return 0
 
