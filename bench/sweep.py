@@ -49,9 +49,13 @@ VARIANTS: dict[str, dict[str, str]] = {
     # tiny per-step policy forwards. If it is real, dropping to a single
     # intra-op thread (no parallel region at all) or disabling the spin
     # (PASSIVE / zero blocktime) should move end-to-end throughput a lot.
-    "threads1": {"DODGE_TORCH_THREADS": "1"},
-    "threads2": {"DODGE_TORCH_THREADS": "2"},  # what training runs today
-    "threads4": {"DODGE_TORCH_THREADS": "4"},
+    # The spin variants pin OMP_WAIT_POLICY explicitly rather than leaving it
+    # unset. train.py now setdefault()s PASSIVE, so "unset" would silently
+    # become PASSIVE in the child and the A/B would compare two identical
+    # configurations while appearing to compare two different ones.
+    "threads1": {"DODGE_TORCH_THREADS": "1", "OMP_WAIT_POLICY": "ACTIVE", "KMP_BLOCKTIME": "200"},
+    "threads2": {"DODGE_TORCH_THREADS": "2", "OMP_WAIT_POLICY": "ACTIVE", "KMP_BLOCKTIME": "200"},
+    "threads4": {"DODGE_TORCH_THREADS": "4", "OMP_WAIT_POLICY": "ACTIVE", "KMP_BLOCKTIME": "200"},
     "threads1-passive": {
         "DODGE_TORCH_THREADS": "1",
         "OMP_WAIT_POLICY": "PASSIVE",

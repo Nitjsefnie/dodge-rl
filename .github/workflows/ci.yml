@@ -60,12 +60,12 @@ jobs:
           python bench/golden_traj.py --check \
             || echo "(bitwise hash differs from the reference machine — expected on the other CPU population)"
 
-      # The portable behaviour check. Currently reporting only: the tolerance
-      # has not yet been chosen from measured data, and a guessed tolerance is
-      # not a gate. Flip off --profile once the cross-population divergence is
-      # known.
-      - name: Golden trajectory (numeric, portable — profiling only)
-        run: python bench/golden_traj.py --check-approx bench/golden_traj_ref.npz --profile
+      # The portable behaviour gate. Tolerance chosen from the measured
+      # cross-population divergence (max |reward diff| 5.551e-17, obs bitwise
+      # identical), not guessed — see golden_traj.py. Structural divergence
+      # (termination pattern, hit sequence) fails regardless of tolerance.
+      - name: Golden trajectory (numeric, portable — GATE)
+        run: python bench/golden_traj.py --check-approx bench/golden_traj_ref.npz
 
       - name: Test suite
         env:

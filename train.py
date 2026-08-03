@@ -9,8 +9,17 @@ import time
 from collections import deque
 from pathlib import Path
 
-import gymnasium as gym
-import torch
+# Set before torch is imported: the OpenMP runtime reads these once at library
+# init, so assigning them later has no effect. Measured on a clean 4-vCPU
+# runner over 3 interleaved rounds (bench/sweep.py, 2026-08-03): 939.5 vs
+# 844.6 median steps/s against the previous spin-wait default, a 1.11x gain
+# with 1.2% spread and the same ordering in every round. setdefault, so
+# bench/sweep.py can still pin these explicitly to A/B them.
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("KMP_BLOCKTIME", "0")
+
+import gymnasium as gym  # noqa: E402
+import torch  # noqa: E402
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.utils import set_random_seed

@@ -52,13 +52,23 @@ N_STEPS = 300
 HASH_FILE = Path(__file__).resolve().parent / "golden_traj.sha256"
 REF_FILE = Path(__file__).resolve().parent / "golden_traj_ref.npz"
 
-# Pass criterion for --check-approx. PROVISIONAL: these are placeholders until
-# the cross-population divergence profile has actually been measured. Run
-# `--check-approx --profile` on both runner populations first, then set them
-# from that data. Guessing a tolerance is how a gate ends up passing things it
-# should catch.
-DEFAULT_ATOL = 1e-9
-DEFAULT_HORIZON = 25
+# Pass criterion for --check-approx, set from measured data rather than taste.
+# Six runners spanning both hash populations were profiled against the box
+# reference on 2026-08-03. The result was much narrower than the differing
+# hashes suggested:
+#
+#   AMD EPYC 7763 / 9V74 : max |obs diff| 0.0        max |reward diff| 0.0
+#   Intel Xeon 8573C     : max |obs diff| 0.0        max |reward diff| 5.551e-17
+#
+# So the physics is bitwise identical on every machine sampled, and the entire
+# cross-population difference is one ULP in a single reward scalar. Reward is
+# not fed back into the simulation, so it does not amplify — which is why the
+# tolerance applies over the whole trajectory instead of a short horizon.
+#
+# 1e-12 sits ~5 orders of magnitude above the observed noise floor and many
+# orders below any semantic change, which moves trajectories grossly.
+DEFAULT_ATOL = 1e-12
+DEFAULT_HORIZON = 0  # 0 = enforce over every emission
 
 
 def _action_sequence(action_space) -> np.ndarray:
@@ -185,15 +195,26 @@ def compare_approx(record: dict[str, np.ndarray], ref_path: Path, atol: float,
     if profile_only:
         return 0
 
-    window = obs_profile[: horizon + 1]
-    worst = float(window.max())
-    if worst > atol:
-        bad = int(np.argmax(window > atol))
-        print(f"FAIL: |obs diff| {worst:.3e} exceeds atol {atol:.0e} "
-              f"within the first {horizon} emissions (first at {bad})")
+    scope = "every emission" if horizon <= 0 else f"the first {horizon} emissions"
+    obs_window = obs_profile if horizon <= 0 else obs_profile[: horizon + 1]
+    reward_window = reward_diff if horizon <= 0 else reward_diff[:horizon]
+
+    worst_obs = float(obs_window.max())
+    worst_reward = float(reward_window.max()) if reward_window.size else 0.0
+    failed = False
+    if worst_obs > atol:
+        print(f"FAIL: |obs diff| {worst_obs:.3e} exceeds atol {atol:.0e} over {scope} "
+              f"(first at emission {int(np.argmax(obs_window > atol))})")
+        failed = True
+    if worst_reward > atol:
+        print(f"FAIL: |reward diff| {worst_reward:.3e} exceeds atol {atol:.0e} over {scope} "
+              f"(first at step {int(np.argmax(reward_window > atol))})")
+        failed = True
+    if failed:
         return 1
-    print(f"PASS: within atol {atol:.0e} over the first {horizon} emissions "
-          f"(worst {worst:.3e})")
+
+    print(f"PASS: within atol {atol:.0e} over {scope} "
+          f"(worst obs {worst_obs:.3e}, worst reward {worst_reward:.3e})")
     return 0
 
 
