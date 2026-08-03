@@ -46,12 +46,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # Required: golden_traj.py imports dodge_rl, and running it as
+          # `python bench/golden_traj.py` puts bench/ on sys.path, not the
+          # repo root.
+          pip install -e .
 
       - name: Probe
         run: |
           echo "leg=${{ matrix.leg }}"
           grep -m1 'model name' /proc/cpuinfo
-          grep -m1 -o 'avx512[a-z0-9_]*' /proc/cpuinfo | head -5 || echo "no avx512"
+          if grep -qm1 avx512f /proc/cpuinfo; then
+            echo "ISA avx512f=yes"
+          else
+            echo "ISA avx512f=no"
+          fi
           python -c "import numpy, mujoco, gymnasium; print('numpy', numpy.__version__, '| mujoco', mujoco.__version__, '| gymnasium', gymnasium.__version__)"
           echo -n "HASH "
           python bench/golden_traj.py
