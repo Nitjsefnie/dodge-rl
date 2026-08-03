@@ -42,12 +42,11 @@ class ProgressCallback(BaseCallback):
         self._episodes: deque[dict] = deque(maxlen=self.LOOKBACK)
 
     def _on_training_start(self) -> None:
-        # Avoid a torrent of progress lines when resuming from N steps.
+        # Avoid a torrent of progress lines when resuming from N steps:
+        # the next STRICTLY greater boundary (resuming at an exact multiple
+        # must not reprint it, and 0 rounds up to the first real boundary).
         ts = self.model.num_timesteps
-        self._next_print = (
-            ((ts + self.PRINT_INTERVAL - 1) // self.PRINT_INTERVAL)
-            * self.PRINT_INTERVAL
-        )
+        self._next_print = ((ts // self.PRINT_INTERVAL) + 1) * self.PRINT_INTERVAL
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos") or []
@@ -108,7 +107,7 @@ def main() -> None:
 
     # VecMonitor opens monitor.csv in write mode; preserve prior rows on resume.
     if args.resume and monitor_csv.exists():
-        backup = run_dir / f"monitor.csv.{int(time.time())}.bak"
+        backup = run_dir / f"monitor.csv.{time.time_ns()}.bak"
         monitor_csv.rename(backup)
 
     env_fns = [make_env_factory(seed, i) for i in range(n_envs)]

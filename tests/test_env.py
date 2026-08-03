@@ -523,13 +523,14 @@ def test_render_metadata_declared():
 def test_upright_band_edges(env):
     """The +1.0 upright term applies only inside torso z in [1.0, 2.0].
 
-    Out-of-band case (z = 0.6): with no active projectiles, zero action, and
-    no wall/hit event, the step reward must be exactly 0.0 — a widened
-    UPRIGHT_Z_RANGE such as (0.0, 3.0) would emit +1.0 and fail. In-band
-    case (z = 1.2) must yield exactly +1.0. Expected values are computed
-    from the post-step torso z, the same state the env scores.
+    Out-of-band cases (z = 0.6 below, z = 2.5 above): with no active
+    projectiles, zero action, and no wall/hit event, the step reward must be
+    exactly 0.0 — a widened UPRIGHT_Z_RANGE such as (0.0, 3.0) or (1.0, 9.0)
+    would emit +1.0 and fail. In-band case (z = 1.2) must yield exactly +1.0.
+    Expected values are computed from the post-step torso z, the same state
+    the env scores.
     """
-    for z, _ in ((0.6, "below"), (1.2, "inside")):
+    for z, label in ((0.6, "below"), (1.2, "inside"), (2.5, "above")):
         env.reset(seed=31)
         env.data.qvel[:] = 0.0
         qadr = _freejoint_qposadr(env.model, "torso")
@@ -544,9 +545,17 @@ def test_upright_band_edges(env):
         expected = 1.0 if 1.0 <= torso_z <= 2.0 else 0.0
         if z == 0.6:
             # 0.015 s of dynamics cannot lift the torso into the band.
-            assert torso_z < 1.0, f"post-step torso z {torso_z} unexpectedly in band"
+            assert torso_z < 1.0, (
+                f"{label} case: post-step torso z {torso_z} unexpectedly in band"
+            )
+        if z == 2.5:
+            # Freefall from 2.5 m drops only ~1 mm in one 0.015 s step.
+            assert torso_z > 2.0, (
+                f"{label} case: post-step torso z {torso_z} unexpectedly in band"
+            )
         assert reward == pytest.approx(expected, abs=1e-6), (
-            f"z start {z}: reward {reward}, expected {expected} (post-step z {torso_z})"
+            f"{label} case, z start {z}: reward {reward}, expected {expected} "
+            f"(post-step z {torso_z})"
         )
 
 
@@ -564,7 +573,7 @@ class _ClampForcingRng(np.random.Generator):
         assert size is None
         if low == 8.0 and high == 15.0:  # radius
             return 8.0
-        if low == 0.0:  # azimuth (0, 2*pi)
+        if low == 0.0 and high == 2.0 * np.pi:  # azimuth
             return 0.0
         if low == -10.0 and high == 75.0:  # elevation
             return -10.0

@@ -141,25 +141,27 @@ def test_sigterm_saves_interrupt_and_resume_preserves_monitor():
                 time.sleep(0.25)
             else:
                 proc.terminate()
-                proc.wait(timeout=30)
+                stdout, stderr = proc.communicate(timeout=30)
                 pytest.fail(
                     "monitor.csv did not gain a data row before timeout; "
-                    f"stdout:\n{proc.stdout.read() if proc.stdout else ''}\n"
-                    f"stderr:\n{proc.stderr.read() if proc.stderr else ''}"
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
                 )
 
             proc.send_signal(signal.SIGTERM)
 
+            # communicate() drains the pipes as it waits; a bare wait() with
+            # unread PIPEs can deadlock if output exceeds the pipe buffer.
             try:
-                proc.wait(timeout=60)
+                stdout, stderr = proc.communicate(timeout=60)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait(timeout=30)
+                stdout, stderr = proc.communicate(timeout=30)
 
-            assert proc.returncode != 0, (
-                f"expected nonzero exit after SIGTERM, got {proc.returncode}\n"
-                f"stdout:\n{proc.stdout.read() if proc.stdout else ''}\n"
-                f"stderr:\n{proc.stderr.read() if proc.stderr else ''}"
+            # train.py's SIGTERM handler does sys.exit(143); anything else
+            # (e.g. the SIGKILL fallback, -9) means the graceful path failed.
+            assert proc.returncode == 143, (
+                f"expected exit 143 after SIGTERM, got {proc.returncode}\n"
+                f"stdout:\n{stdout}\nstderr:\n{stderr}"
             )
             assert (run_dir / "interrupt.zip").exists(), "interrupt.zip missing"
 

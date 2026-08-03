@@ -62,6 +62,8 @@ def parse_args(argv=None):
     parser.add_argument("--max-frames", type=int, default=None,
                         help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.episodes < 1:
+        parser.error("--episodes must be >= 1")
     if args.fps < 1:
         parser.error("--fps must be >= 1")
     return args
@@ -123,42 +125,49 @@ def run(args, gl_state):
 
     def capture():
         nonlocal frames_written
-        imageio_writer.append_data(env.render())
+        frame = env.render()
         # First successful render proves the GL backend is up; failures past
         # this point are not GL-init failures and must not trigger a re-exec.
+        # Set the flag BEFORE append_data: a writer failure on the first
+        # frame is not a GL failure either.
         gl_state["rendered"] = True
+        imageio_writer.append_data(frame)
         frames_written += 1
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    imageio_writer = imageio.get_writer(args.out, fps=args.fps)
+    # Nested try/finally: the env closes even if get_writer raises, and even
+    # if imageio_writer.close() raises.
     try:
-        for ep in range(args.episodes):
-            if capped():
-                break
-            obs, _ = env.reset(seed=args.seed if ep == 0 else None)
-            capture()
-            total_reward, steps = 0.0, 0
-            info = {}
-            while not capped():
-                if model is not None:
-                    action, _ = model.predict(obs, deterministic=True)
-                else:
-                    action = env.action_space.sample()
-                obs, reward, terminated, truncated, info = env.step(action)
-                total_reward += reward
-                steps += 1
-                if steps % capture_every == 0:
-                    capture()
-                if terminated or truncated:
+        imageio_writer = imageio.get_writer(args.out, fps=args.fps)
+        try:
+            for ep in range(args.episodes):
+                if capped():
                     break
-            if steps > 0:  # cap landing on an episode boundary: nothing ran
-                episode_summaries.append(
-                    f"episode {ep}: reward={total_reward:.2f} "
-                    f"hits={info.get('hits', 0)} "
-                    f"wall_death={info.get('wall_death', False)}"
-                )
+                obs, _ = env.reset(seed=args.seed if ep == 0 else None)
+                capture()
+                total_reward, steps = 0.0, 0
+                info = {}
+                while not capped():
+                    if model is not None:
+                        action, _ = model.predict(obs, deterministic=True)
+                    else:
+                        action = env.action_space.sample()
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    total_reward += reward
+                    steps += 1
+                    if steps % capture_every == 0:
+                        capture()
+                    if terminated or truncated:
+                        break
+                if steps > 0:  # cap landing on an episode boundary: nothing ran
+                    episode_summaries.append(
+                        f"episode {ep}: reward={total_reward:.2f} "
+                        f"hits={info.get('hits', 0)} "
+                        f"wall_death={info.get('wall_death', False)}"
+                    )
+        finally:
+            imageio_writer.close()
     finally:
-        imageio_writer.close()
         env.close()
 
     print(f"backend: {os.environ.get('MUJOCO_GL')}")

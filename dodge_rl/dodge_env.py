@@ -74,11 +74,11 @@ class DodgeEnv(MujocoEnv):
 
     def __init__(self, xml_file=None, frame_skip=FRAME_SKIP, **kwargs):
         xml_file = xml_file or str(XML_PATH)
-        # Resolve model-derived indices once from a probe model so the
-        # observation space can be built before super().__init__ loads it
-        # again; re-resolve against self.model afterwards (identical file).
-        probe = mujoco.MjModel.from_xml_path(xml_file)
-        obs_size = self._obs_size(probe)
+        # Load the model once: the observation space is sized from it before
+        # super().__init__, which then adopts the same model through the
+        # _initialize_simulation override instead of re-parsing the XML.
+        self._probe_model = mujoco.MjModel.from_xml_path(xml_file)
+        obs_size = self._obs_size(self._probe_model)
         observation_space = Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64)
         super().__init__(
             xml_file,
@@ -91,28 +91,27 @@ class DodgeEnv(MujocoEnv):
         self._slots = [self._fresh_slot() for _ in range(NUM_SLOTS)]
         self._init_episode_state()
 
+    def _initialize_simulation(self):
+        """Adopt the model loaded in __init__ instead of re-loading the file."""
+        model = self._probe_model
+        del self._probe_model
+        # Same offscreen buffer sizing as the stock MujocoEnv loader.
+        model.vis.global_.offwidth = self.width
+        model.vis.global_.offheight = self.height
+        return model, mujoco.MjData(model)
+
     # ------------------------------------------------------------------
     # Index resolution
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _obs_size(model):
-        hum_nq = hum_nv = 0
-        for jid in range(model.njnt):
-            body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, model.jnt_bodyid[jid])
-            if body_name.startswith("proj"):
-                continue
-            hum_nq += 7 if model.jnt_type[jid] == mujoco.mjtJoint.mjJNT_FREE else 1
-            hum_nv += 6 if model.jnt_type[jid] == mujoco.mjtJoint.mjJNT_FREE else 1
-        return (hum_nq - 2) + hum_nv + NUM_SLOTS * 7
+    def _humanoid_body_ids(model):
+        """Return (torso body id, set of humanoid body ids).
 
-    def _resolve_indices(self):
-        model = self.model
-
+        The humanoid subtree is the torso body and all its descendants;
+        projectiles are excluded by tree ancestry, not by name.
+        """
         torso_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso")
-        self._torso_bid = torso_bid
-
-        # Humanoid subtree = torso body and all its descendants.
         hum_bodies = set()
         for bid in range(1, model.nbody):
             b = bid
@@ -121,6 +120,25 @@ class DodgeEnv(MujocoEnv):
                     hum_bodies.add(bid)
                     break
                 b = model.body_parentid[b]
+        return torso_bid, hum_bodies
+
+    @classmethod
+    def _obs_size(cls, model):
+        _, hum_bodies = cls._humanoid_body_ids(model)
+        hum_nq = hum_nv = 0
+        for jid in range(model.njnt):
+            if model.jnt_bodyid[jid] not in hum_bodies:
+                continue
+            is_free = model.jnt_type[jid] == mujoco.mjtJoint.mjJNT_FREE
+            hum_nq += 7 if is_free else 1
+            hum_nv += 6 if is_free else 1
+        return (hum_nq - 2) + hum_nv + NUM_SLOTS * 7
+
+    def _resolve_indices(self):
+        model = self.model
+
+        torso_bid, hum_bodies = self._humanoid_body_ids(model)
+        self._torso_bid = torso_bid
 
         # Humanoid joint qpos/qvel indices, in joint order (never assume the
         # projectile freejoints come first/last — mask by joint address).
@@ -137,6 +155,11 @@ class DodgeEnv(MujocoEnv):
             hum_qvel_idx.extend(range(vadr, vadr + (6 if is_free else 1)))
         self._hum_qpos_idx = np.asarray(hum_qpos_idx)
         self._hum_qvel_idx = np.asarray(hum_qvel_idx)
+        # The obs drops root x,y by ADDRESS via _root_qposadr — the root
+        # freejoint is not assumed to be the first humanoid joint.
+        self._hum_qpos_obs_mask = ~np.isin(
+            self._hum_qpos_idx, (self._root_qposadr, self._root_qposadr + 1)
+        )
 
         # Projectile slots: freejoint addresses, geom id, parked position.
         self._proj_qposadr = []
@@ -327,17 +350,20 @@ class DodgeEnv(MujocoEnv):
 
     def _get_obs(self):
         data = self.data
-        hum_qpos = data.qpos[self._hum_qpos_idx]
+        hum_qpos = data.qpos[self._hum_qpos_idx][self._hum_qpos_obs_mask]
         hum_qvel = data.qvel[self._hum_qvel_idx]
 
         torso_pos = data.xpos[self._torso_bid]
         torso_vel = data.qvel[self._root_dofadr : self._root_dofadr + 3]
 
         active = [s for s in range(NUM_SLOTS) if self._slots[s]["active"]]
+        rels = {
+            s: (self._proj_pos(s) - torso_pos, self._proj_vel(s) - torso_vel)
+            for s in active
+        }
 
         def time_to_closest_approach(slot):
-            rel = self._proj_pos(slot) - torso_pos
-            rel_vel = self._proj_vel(slot) - torso_vel
+            rel, rel_vel = rels[slot]
             denom = rel_vel @ rel_vel
             if denom <= 0.0:
                 return np.inf
@@ -347,33 +373,32 @@ class DodgeEnv(MujocoEnv):
 
         blocks = []
         for slot in active:
-            rel = self._proj_pos(slot) - torso_pos
-            rel_vel = self._proj_vel(slot) - torso_vel
+            rel, rel_vel = rels[slot]
             blocks.append(np.concatenate(([1.0], rel, rel_vel)))
         for _ in range(NUM_SLOTS - len(active)):
             blocks.append(np.zeros(7))
 
-        return np.concatenate([hum_qpos[2:], hum_qvel] + blocks)
+        return np.concatenate([hum_qpos, hum_qvel] + blocks)
 
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
 
-    def do_simulation(self, ctrl, n_frames):
-        if np.array(ctrl).shape != (self.model.nu,):
-            raise ValueError(
-                f"Action dimension mismatch. Expected {(self.model.nu,)}, "
-                f"found {np.array(ctrl).shape}"
-            )
+    def _step_mujoco_simulation(self, ctrl, n_frames):
+        # The parent do_simulation keeps its action-shape validation; only
+        # the substep loop is overridden so hit detection and min_approach
+        # sampling interleave with every physics substep.
         self.data.ctrl[:] = ctrl
-        self._step_hits = 0
         for _ in range(n_frames):
             mujoco.mj_step(self.model, self.data)
             self._sample_min_approach()
             self._register_hits()
+        # Populates cfrc_ext et al., as the stock implementation does.
+        mujoco.mj_rnePostConstraint(self.model, self.data)
 
     def step(self, action):
         action = np.asarray(action, dtype=np.float64)
+        self._step_hits = 0
         self.do_simulation(action, self.frame_skip)
 
         torso_pos = self.data.xpos[self._torso_bid].copy()
