@@ -78,6 +78,11 @@ WALL_LIMIT = 1.5
 # 0.5 m sits well below a deep crouch and well above lying down.
 FALL_LIMIT = 0.5
 
+# Height of the cell the humanoid is confined to. Only used to decide whether
+# a projectile is "inside the box" for the dodge counter — the ceiling is not
+# lethal and has no geometry, exactly like the walls.
+ARENA_HEIGHT = 3.0
+
 # Diagnostic: when DODGE_DEBUG_HIT_GEOMS=1, info gains "hit_geoms", a per-geom
 # tally of what the projectiles actually struck. Off by default and inert when
 # off, so it costs nothing and changes no observation, reward or hash.
@@ -237,7 +242,7 @@ class DodgeEnv(MujocoEnv):
 
     @staticmethod
     def _fresh_slot():
-        return {"active": False, "spawn_time": 0.0, "ttl": 0.0}
+        return {"active": False, "spawn_time": 0.0, "ttl": 0.0, "in_box": False}
 
     def _init_episode_state(self):
         self._next_spawn_time = FIRST_SPAWN_TIME
@@ -247,6 +252,7 @@ class DodgeEnv(MujocoEnv):
         self._spawns = 0
         self._wall_death = False
         self._fall_death = False
+        self._dodged = 0
         self._min_approach = np.inf
 
     def _point_pos(self, name):
@@ -321,6 +327,7 @@ class DodgeEnv(MujocoEnv):
             "active": True,
             "spawn_time": self.data.time,
             "ttl": TTL_FACTOR * distance / speed,
+            "in_box": False,
         }
         self._spawns += 1
         return {"spawn_point": point, "aim_point": aim, "speed": speed}
@@ -381,6 +388,33 @@ class DodgeEnv(MujocoEnv):
             self._hits += 1
             self._step_hits += 1
             self._park(slot)
+
+    def _update_dodges(self):
+        """Count projectiles that entered the arena cell and left it again.
+
+        A dodge is a projectile that passed *all the way through* the 3x3x3
+        cell the humanoid is confined to without touching it — it must have
+        been inside and then left. Deliberately not "it despawned without
+        hitting": a shot that expired on TTL while still inside, or one that
+        was always going to miss the cell entirely, was never dodged. A
+        projectile that hit is parked during the physics substeps, before this
+        runs, so it cannot be counted here.
+        """
+        for slot in range(NUM_SLOTS):
+            state = self._slots[slot]
+            if not state["active"]:
+                continue
+            pos = self._proj_pos(slot)
+            inside = (
+                abs(pos[0]) <= WALL_LIMIT
+                and abs(pos[1]) <= WALL_LIMIT
+                and 0.0 <= pos[2] <= ARENA_HEIGHT
+            )
+            if inside:
+                state["in_box"] = True
+            elif state["in_box"]:
+                state["in_box"] = False
+                self._dodged += 1
 
     def _despawn_expired(self, torso_pos):
         for slot in range(NUM_SLOTS):
@@ -463,6 +497,9 @@ class DodgeEnv(MujocoEnv):
 
         torso_pos = self.data.xpos[self._torso_bid].copy()
 
+        # Before despawn, so a projectile that leaves the cell and is then
+        # retired by TTL or distance still registers as having passed through.
+        self._update_dodges()
         self._despawn_expired(torso_pos)
         self._maybe_spawn()
 
@@ -501,6 +538,10 @@ class DodgeEnv(MujocoEnv):
             "hits": self._hits,
             "wall_death": self._wall_death,
             "fall_death": self._fall_death,
+            # Projectiles that passed all the way through the cell: the count
+            # of shots actually evaded, as opposed to shots that were never
+            # going to arrive.
+            "dodged": self._dodged,
             "spawns": self._spawns,
             # Sentinel: -1.0 while no projectile has been active this episode.
             "min_approach": self._min_approach if np.isfinite(self._min_approach) else -1.0,

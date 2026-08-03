@@ -53,6 +53,7 @@ def main(argv=None):
     env.action_space.seed(args.seed)
 
     rewards, lengths, hits_list, wall_deaths, fall_deaths = [], [], [], [], []
+    dodged_list: list[int] = []
     min_approaches, no_projectile = [], 0
 
     for ep in range(args.episodes):
@@ -74,6 +75,7 @@ def main(argv=None):
         hits_list.append(info["hits"])
         wall_deaths.append(bool(info["wall_death"]))
         fall_deaths.append(bool(info["fall_death"]))
+        dodged_list.append(info["dodged"])
         if info["min_approach"] < 0.0:
             no_projectile += 1
         else:
@@ -86,6 +88,12 @@ def main(argv=None):
     hits_arr = np.asarray(hits_list, dtype=np.float64)
     wall_frac = float(np.mean(wall_deaths)) if wall_deaths else 0.0
     fall_frac = float(np.mean(fall_deaths)) if fall_deaths else 0.0
+    dodged_arr = np.asarray(dodged_list, dtype=np.float64)
+    # Only shots that actually reached the cell count as "arrived": a dodge
+    # plus the hit that ended the episode. Spawns include shots still in
+    # flight when the episode ended, which were neither dodged nor survived.
+    arrived = float(dodged_arr.sum() + hits_arr.sum())
+    dodge_rate = f"{dodged_arr.sum() / arrived:.3f}" if arrived > 0 else "n/a"
     min_app_str = f"{np.mean(min_approaches):.3f}" if min_approaches else "n/a"
 
     print(f"Policy:              {args.checkpoint if args.checkpoint else 'random'}")
@@ -93,7 +101,9 @@ def main(argv=None):
     print(f"{'Metric':<30}{'Mean':>12}{'Std':>12}")
     print(f"{'episode reward':<30}{rewards.mean():>12.3f}{rewards.std():>12.3f}")
     print(f"{'episode length':<30}{lengths.mean():>12.1f}{lengths.std():>12.1f}")
+    print(f"{'dodged / episode':<30}{dodged_arr.mean():>12.3f}{dodged_arr.std():>12.3f}")
     print(f"{'hits / episode':<30}{hits_arr.mean():>12.3f}{hits_arr.std():>12.3f}")
+    print(f"{'dodge rate (dodged/arrived)':<30}{dodge_rate:>12}{'-':>12}")
     print(f"{'wall-death fraction':<30}{wall_frac:>12.3f}{'-':>12}")
     print(f"{'fall-death fraction':<30}{fall_frac:>12.3f}{'-':>12}")
     print(f"{'min_approach (projectile eps)':<30}{min_app_str:>12}{'-':>12}")

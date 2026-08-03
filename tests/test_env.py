@@ -157,6 +157,7 @@ def test_wall_termination(env):
         "hits": 0,
         "wall_death": False,
         "fall_death": False,
+        "dodged": 0,
         "spawns": 0,
         "min_approach": -1.0,
     }
@@ -171,6 +172,51 @@ def test_wall_termination(env):
     assert info["wall_death"]
     # The killing step scores nothing; the shortened episode is the whole cost.
     assert reward == pytest.approx(0.0, abs=1e-12)
+
+
+def _launch_through(env, start, velocity):
+    """Activate slot 0 and override it onto a chosen straight-line course."""
+    env._spawn_projectile(0)  # proper slot activation; placement overridden
+    qadr = _freejoint_qposadr(env.model, "proj0")
+    vadr = _freejoint_dofadr(env.model, "proj0")
+    env.data.qpos[qadr : qadr + 3] = np.asarray(start, dtype=np.float64)
+    env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+    env.data.qvel[vadr : vadr + 3] = np.asarray(velocity, dtype=np.float64)
+    env.data.qvel[vadr + 3 : vadr + 6] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+
+
+def test_dodged_counts_only_projectiles_that_passed_through_the_cell(env):
+    """A dodge is a shot that entered the 3x3x3 cell and left it again.
+
+    Pins both halves: a shot crossing the cell counts once, and a shot that
+    never enters counts zero. The distinction matters because "despawned
+    without hitting" would also count shots that were never going to arrive,
+    which would make the dodge rate look good for doing nothing.
+    """
+    # Crosses the cell, well above the humanoid so it cannot make contact.
+    env.reset(seed=21)
+    env.data.qvel[:] = 0.0
+    torso_z = _torso_pos(env)[2]
+    _launch_through(env, [0.5, 0.0, torso_z + 1.0], [10.0, 0.0, 0.0])
+    info = {"dodged": 0}
+    for _ in range(30):
+        _, _, terminated, truncated, info = env.step(np.zeros(env.model.nu))
+        if info["dodged"] or terminated or truncated:
+            break
+    assert info["dodged"] == 1, "a shot crossing the cell must count as dodged"
+    assert info["hits"] == 0, "this shot must not have touched the humanoid"
+
+    # Never enters the cell: outside in x for its whole flight.
+    env.reset(seed=22)
+    env.data.qvel[:] = 0.0
+    torso_z = _torso_pos(env)[2]
+    _launch_through(env, [5.0, 0.0, torso_z + 1.0], [10.0, 0.0, 0.0])
+    for _ in range(30):
+        _, _, terminated, truncated, info = env.step(np.zeros(env.model.nu))
+        if terminated or truncated:
+            break
+    assert info["dodged"] == 0, "a shot that never entered the cell was not dodged"
 
 
 def test_falling_is_lethal(env):
@@ -467,7 +513,14 @@ def test_despawn_ttl(env):
     env.data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
     env.data.qvel[vadr : vadr + 3] = np.array([0.0, 5.0, 0.0])
     env.data.qvel[vadr + 3 : vadr + 6] = 0.0
-    env._slots[0] = {"active": True, "spawn_time": env.data.time, "ttl": 1.5 * 10.0 / 5.0}
+    # Compose from the canonical slot shape rather than restating it: a
+    # hand-built dict breaks (KeyError) every time the slot gains a field.
+    env._slots[0] = {
+        **env._fresh_slot(),
+        "active": True,
+        "spawn_time": env.data.time,
+        "ttl": 1.5 * 10.0 / 5.0,
+    }
 
     action = np.zeros(env.model.nu)
     t0 = env.data.time

@@ -150,9 +150,18 @@ ordering).
   number of steps survived, so nothing can trade against survival or be
   farmed independently of it.
 - info dict reports per-episode counters: `hits`, `wall_death` (bool),
-  `spawns`, `min_approach` (closest any projectile ever got to the
-  head/torso/pelvis set). `min_approach` is now diagnostics only — it no
-  longer enters the reward, but it shows whether near-misses are tightening.
+  `fall_death` (bool), `dodged`, `spawns`, `min_approach` (closest any
+  projectile ever got to the head/torso/pelvis set). `min_approach` is
+  diagnostics only — it no longer enters the reward.
+- **`dodged`** counts projectiles that entered the 3×3×3 cell and left it
+  again, i.e. shots that were actually evaded. Deliberately not "despawned
+  without hitting": that would also count shots which were never going to
+  arrive, so a policy that dies instantly would appear to dodge everything.
+  With `hits`, it gives a survival rate against shots that reached the
+  humanoid — `dodged / (dodged + hits)` — which `spawns` cannot express,
+  since spawns include shots still in flight when the episode ended.
+  Verified on a random policy: `dodged 0.000`, `hits 0.000`, rate `n/a`,
+  because it falls at ~52 steps before any projectile arrives.
 
 **Termination:** three lethal failure modes, all terminal —
 - **hit**: ANY contact between a projectile geom and any humanoid geom, however

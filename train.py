@@ -113,11 +113,17 @@ class ProgressCallback(BaseCallback):
         mean_r = sum(e["r"] for e in episodes) / len(episodes)
         mean_l = sum(e["l"] for e in episodes) / len(episodes)
         mean_hits = sum(e.get("hits", 0) for e in episodes) / len(episodes)
-        wall_deaths = sum(bool(e.get("wall_death", False)) for e in episodes)
-        wall_frac = wall_deaths / len(episodes)
+        mean_dodged = sum(e.get("dodged", 0) for e in episodes) / len(episodes)
+        wall_frac = sum(bool(e.get("wall_death", False)) for e in episodes) / len(episodes)
+        fall_frac = sum(bool(e.get("fall_death", False)) for e in episodes) / len(episodes)
+        # dodged = projectiles that passed all the way through the cell;
+        # hits = the one that ended the episode. Both are per episode, so
+        # dodged/(dodged+hits) reads as a survival rate against shots that
+        # actually arrived, which spawns alone cannot tell you.
         print(
             f"Step {self.num_timesteps}: reward={mean_r:.3f}, "
-            f"len={mean_l:.1f}, hits={mean_hits:.2f}, wall_death={wall_frac:.3f}"
+            f"len={mean_l:.1f}, dodged={mean_dodged:.2f}, hits={mean_hits:.2f}, "
+            f"fall_death={fall_frac:.3f}, wall_death={wall_frac:.3f}"
         )
 
 
@@ -158,7 +164,9 @@ def main() -> None:
     vec_env = VecMonitor(
         SubprocVecEnv(env_fns),
         filename=str(monitor_csv),
-        info_keywords=("hits", "wall_death", "fall_death", "spawns", "min_approach"),
+        info_keywords=(
+            "hits", "wall_death", "fall_death", "dodged", "spawns", "min_approach",
+        ),
     )
 
     if args.resume:
