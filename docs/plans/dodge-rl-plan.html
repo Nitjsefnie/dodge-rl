@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Implementation plan — Humanoid projectile dodging (dodge-rl)</title>
+  <style>
+    :root {
+      --ivory:    #252420;
+      --slate:    #F5F3EC;
+      --clay:     #D97757;
+      --oat:      #3A352B;
+      --olive:    #8FA56E;
+      --gray-150: #2E2C27;
+      --gray-300: #3A3833;
+      --gray-500: #8F8D82;
+      --gray-700: #CFCCC2;
+      --white:    #252420;
+      --serif: ui-serif, Georgia, 'Times New Roman', serif;
+      --sans:  system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      --mono:  ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: var(--sans);
+      background: #1B1A17;
+      color: var(--gray-700);
+      line-height: 1.55;
+      padding: 56px 32px 120px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .page { margin: 0 auto; max-width: 980px; }
+    header.page-head { margin-bottom: 32px; max-width: 820px; }
+    .eyebrow { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gray-500); margin-bottom: 12px; }
+    h1 { font-family: var(--serif); font-weight: 500; font-size: 38px; line-height: 1.15; color: var(--slate); margin-bottom: 18px; letter-spacing: -0.01em; }
+    .prompt-box { background: var(--gray-150); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 16px 20px; font-size: 14.5px; color: var(--gray-700); }
+    .prompt-box .label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); display: block; margin-bottom: 6px; }
+    nav.toc { margin: 0 0 48px; font-size: 13.5px; }
+    nav.toc a { color: var(--clay); text-decoration: none; margin-right: 18px; font-family: var(--mono); font-size: 12.5px; }
+    nav.toc a:hover { text-decoration: underline; }
+    section { margin-bottom: 64px; }
+    .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+    .sec-head .num { font-family: var(--mono); font-size: 12px; background: var(--oat); color: var(--slate); padding: 3px 9px; border-radius: 8px; }
+    .sec-head h2 { font-family: var(--serif); font-weight: 500; font-size: 26px; color: var(--slate); letter-spacing: -0.01em; }
+    .sec-intro { font-size: 14.5px; color: var(--gray-500); max-width: 720px; margin-bottom: 28px; }
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 64px; }
+    @media (max-width: 900px) { .summary { grid-template-columns: repeat(2, 1fr); } }
+    .summary .cell { background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 18px 20px; }
+    .summary .k { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); margin-bottom: 6px; }
+    .summary .v { font-size: 17px; color: var(--slate); font-weight: 600; }
+    .summary .v.accent { color: var(--clay); }
+    .invariants { display: flex; flex-direction: column; gap: 14px; max-width: 860px; }
+    .q { background: var(--white); border: 1.5px solid var(--gray-300); border-left: 4px solid var(--clay); border-radius: 10px; padding: 16px 20px; }
+    .q .qt { font-weight: 600; font-size: 15px; color: var(--slate); margin-bottom: 4px; }
+    .q .qd { font-size: 13.5px; color: var(--gray-500); }
+    .q.inv { border-left-color: var(--olive); }
+    .milestones { display: flex; flex-direction: column; gap: 0; }
+    .milestone { display: grid; grid-template-columns: 120px 28px 1fr; gap: 0 18px; position: relative; }
+    .milestone .when { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--gray-500); padding-top: 4px; }
+    .milestone .dot-col { display: flex; flex-direction: column; align-items: center; }
+    .milestone .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--white); border: 3px solid var(--clay); margin-top: 4px; flex-shrink: 0; }
+    .milestone .line { width: 2px; flex: 1; background: var(--gray-300); margin: 4px 0; }
+    .milestone:last-child .line { display: none; }
+    .milestone .body { padding-bottom: 36px; }
+    .milestone .body h3 { font-family: var(--serif); font-weight: 500; font-size: 19px; color: var(--slate); margin-bottom: 4px; }
+    .milestone .body p { font-size: 14px; color: var(--gray-500); margin-bottom: 10px; max-width: 620px; }
+    .milestone .tags { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .milestone .tag { font-family: var(--mono); font-size: 11.5px; background: var(--gray-150); border: 1px solid var(--gray-300); border-radius: 6px; padding: 3px 8px; color: var(--gray-700); }
+    .decide { display: flex; gap: 8px; align-items: center; }
+    .decide button { font-family: var(--mono); font-size: 11.5px; background: var(--gray-150); color: var(--gray-700); border: 1px solid var(--gray-300); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+    .decide button.on-approve { background: #2D3A24; color: #B6CC96; border-color: #4a5f3a; }
+    .decide button.on-reject { background: #4A2A1C; color: #F0B79C; border-color: #6b3e2a; }
+    .decide input { flex: 1; max-width: 320px; background: var(--white); border: 1px solid var(--gray-300); border-radius: 6px; padding: 4px 10px; font-size: 12.5px; color: var(--gray-700); }
+    .diagram { background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 28px; overflow-x: auto; }
+    .diagram svg { display: block; min-width: 700px; }
+    .diagram text { font-family: var(--mono); }
+    .caption { font-size: 13px; color: var(--gray-500); margin-top: 12px; }
+    .risks { border: 1.5px solid var(--gray-300); border-radius: 12px; overflow: hidden; background: var(--white); }
+    .risks .row { display: grid; grid-template-columns: 1.6fr 90px 1.6fr; gap: 0; }
+    @media (max-width: 780px) { .risks .row { grid-template-columns: 1fr; } }
+    .risks .row + .row { border-top: 1.5px solid var(--gray-300); }
+    .risks .cell { padding: 14px 18px; font-size: 13.5px; }
+    .risks .cell + .cell { border-left: 1.5px solid var(--gray-300); }
+    @media (max-width: 780px) { .risks .cell + .cell { border-left: none; border-top: 1px dashed var(--gray-300); } }
+    .risks .head { background: var(--gray-150); font-weight: 600; color: var(--slate); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .sev { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 6px; font-weight: 600; }
+    .sev.high { background: #4A2A1C; color: #F0B79C; }
+    .sev.med  { background: var(--oat); color: var(--slate); }
+    .sev.low  { background: #2D3A24; color: #B6CC96; }
+    .rtable { border: 1.5px solid var(--gray-300); border-radius: 12px; overflow: hidden; background: var(--white); }
+    .rtable .row { display: grid; grid-template-columns: 1fr 1fr 1.6fr; }
+    @media (max-width: 780px) { .rtable .row { grid-template-columns: 1fr; } }
+    .rtable .row + .row { border-top: 1.5px solid var(--gray-300); }
+    .rtable .cell { padding: 12px 18px; font-size: 13.5px; }
+    .rtable .cell + .cell { border-left: 1.5px solid var(--gray-300); }
+    @media (max-width: 780px) { .rtable .cell + .cell { border-left: none; border-top: 1px dashed var(--gray-300); } }
+    .rtable .head { background: var(--gray-150); font-weight: 600; color: var(--slate); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .rtable code, .milestone code, .q code, .risks code { font-family: var(--mono); font-size: 0.92em; color: #C9B98A; }
+    .evidence { display: flex; flex-direction: column; gap: 10px; }
+    .evidence .row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; background: var(--ivory); border: 1.5px solid var(--gray-300); border-radius: 8px; }
+    .evidence .txt { font-size: 12.5px; color: var(--gray-700); line-height: 1.45; }
+    .evidence .txt strong { color: var(--slate); }
+    .evidence a { color: var(--clay); }
+    .copybar { margin-top: 20px; display: flex; gap: 10px; align-items: center; }
+    .copybar button { font-family: var(--mono); font-size: 12px; background: var(--clay); color: #1B1A17; border: none; border-radius: 8px; padding: 8px 14px; font-weight: 600; cursor: pointer; }
+    .copybar span { font-size: 12px; color: var(--gray-500); }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+    <header class="page-head">
+      <div class="eyebrow">Implementation plan · dodge-rl · vmi3458323 · 2026-08-03</div>
+      <h1>Humanoid projectile dodging — PPO on CPU MuJoCo</h1>
+      <div class="prompt-box">
+        <span class="label">The idea (as agreed in session)</span>
+        A physically simulated human figure with full-body control learns to dodge
+        slow-ish projectiles. It must react, not memorize — every spawn is randomized.
+        Joint anatomy is respected. It lives in a 3×3×3 m box: the floor is safe, the
+        sides kill, projectiles phase through the walls. Spawns are far away (8–15 m)
+        so there is time to adapt; aim is computed once at launch — some shots precise,
+        some offset, targeting whatever body pose it's in (prone → shot from above).
+      </div>
+    </header>
+
+    <nav class="toc">
+      <a href="#invariants">01 invariants</a>
+      <a href="#tasks">02 tasks</a>
+      <a href="#arena">03 arena</a>
+      <a href="#reward">04 reward &amp; obs</a>
+      <a href="#risks">05 risks</a>
+      <a href="#evidence">06 evidence</a>
+    </nav>
+
+    <div class="summary">
+      <div class="cell"><div class="k">Algorithm</div><div class="v accent">PPO · SB3 · MLP 256×256</div></div>
+      <div class="cell"><div class="k">SDD tasks</div><div class="v">4 + final review</div></div>
+      <div class="cell"><div class="k">Step budget</div><div class="v">20–100 M</div></div>
+      <div class="cell"><div class="k">Wall-clock / run</div><div class="v">1.5–15 h (measured)</div></div>
+    </div>
+
+    <section id="invariants">
+      <div class="sec-head"><span class="num">01</span><h2>Design invariants (user-set, binding)</h2></div>
+      <p class="sec-intro">These override implementation convenience. A task that can't satisfy one returns BLOCKED rather than bending it.</p>
+      <div class="invariants">
+        <div class="q inv"><div class="qt">Reactive, not memorized</div><div class="qd">Every projectile's spawn position, direction, speed, timing and target link come from the env's seeded RNG, fresh each episode. No fixed scenario exists anywhere in the code.</div></div>
+        <div class="q inv"><div class="qt">Joint anatomy respected</div><div class="qd">Stock Gymnasium humanoid joint <code>range</code> values used unchanged (knee −160°…−2°, elbow −90°…50°, …). Never widened, never removed; guarded by tests in Tasks 1 and 2.</div></div>
+        <div class="q inv"><div class="qt">3×3×3 arena — sides kill, floor doesn't</div><div class="qd">Torso |x|&gt;1.5 m or |y|&gt;1.5 m ⇒ −100 and termination. No wall geometry at all — a position check. Falling is survivable; getting up is part of the task.</div></div>
+        <div class="q inv"><div class="qt">Projectiles: far, straight, launch-aimed</div><div class="qd">Spawn 8–15 m out on the full shell (incl. overhead), fly straight at constant speed (gravity-compensated), aim computed once at launch — no homing. They contact only humanoid geoms: floor, walls and each other are pass-through. Despawn on hit, TTL, or &gt;20 m.</div></div>
+        <div class="q inv"><div class="qt">Pose-targeted aiming</div><div class="qd">Target is a sampled body link at its current position — a prone body draws fire from above, so no static pose is safe. Coin-flip per shot: precise at link centre vs Gaussian offset (σ = 0.35 m).</div></div>
+      </div>
+    </section>
+
+    <section id="tasks">
+      <div class="sec-head"><span class="num">02</span><h2>Tasks</h2></div>
+      <p class="sec-intro">Serialized SDD on <code>main</code>: one implementer at a time, opus-tier task review after each, fable-tier whole-branch review at the end. Approve/reject below and copy the decisions if you want changes.</p>
+      <div class="milestones">
+        <div class="milestone" data-task="1">
+          <div class="when">Task 1</div>
+          <div class="dot-col"><span class="dot"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>Scaffold, dependencies, arena model XML</h3>
+            <p>Venv (<code>--system-site-packages</code>, reuses system torch 2.13 CPU), <code>gymnasium[mujoco]</code> + SB3 + pytest + imageio; humanoid XML gains 4 gravity-compensated projectile bodies with contact masks (humanoid-only collision). Tests prove: pass-through floor, straight flight, stock joint ranges untouched.</p>
+            <div class="tags"><span class="tag">assets/dodge_humanoid.xml</span><span class="tag">requirements.txt</span><span class="tag">tests/test_model.py</span><span class="tag">route: kimi K2.7</span></div>
+            <div class="decide"><button data-act="approve">approve</button><button data-act="reject">reject</button><input placeholder="annotation…"></div>
+          </div>
+        </div>
+        <div class="milestone" data-task="2">
+          <div class="when">Task 2</div>
+          <div class="dot-col"><span class="dot"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>DodgeEnv — spawner, observation, reward, termination</h3>
+            <p>The core. Gymnasium env, frame_skip 5, 4 projectile slots, seeded spawner (schedule, shell, link-weighted targeting, precise/offset mix, 4–9 m/s), obs = proprioception + per-slot [active, rel-pos, rel-vel] sorted by time-to-closest-approach, reward = upright + proximity shaping − hit(50) − wall(100) − ctrl cost. Wall is the only termination; 2000-step truncation. TDD: determinism, geometry, contact, anatomy-guard tests.</p>
+            <div class="tags"><span class="tag">dodge_rl/dodge_env.py</span><span class="tag">tests/test_env.py</span><span class="tag">route: kimi K3</span></div>
+            <div class="decide"><button data-act="approve">approve</button><button data-act="reject">reject</button><input placeholder="annotation…"></div>
+          </div>
+        </div>
+        <div class="milestone" data-task="3">
+          <div class="when">Task 3</div>
+          <div class="dot-col"><span class="dot"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>Training script — PPO on SubprocVecEnv</h3>
+            <p>SB3 PPO, 6 worker envs, n_steps 2048, batch 4096, lr 3e-4; checkpoints every 1 M steps, resume flag, interrupt-safe save, monitor CSV + a 50 k-step console line (reward, hits/ep, wall-death rate). Smoke test runs 4096 steps end-to-end in the suite.</p>
+            <div class="tags"><span class="tag">train.py</span><span class="tag">tests/test_train_smoke.py</span><span class="tag">route: kimi K2.7</span></div>
+            <div class="decide"><button data-act="approve">approve</button><button data-act="reject">reject</button><input placeholder="annotation…"></div>
+          </div>
+        </div>
+        <div class="milestone" data-task="4">
+          <div class="when">Task 4</div>
+          <div class="dot-col"><span class="dot"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>Evaluation + headless video rendering</h3>
+            <p><code>eval.py</code> (hit rate, wall-death fraction, min-approach stats) and <code>render_video.py</code> (offscreen 640×480 mp4 via <code>MUJOCO_GL=osmesa</code>, egl fallback — the one genuinely unverified system capability on this GPU-less box). Render test in the suite.</p>
+            <div class="tags"><span class="tag">eval.py</span><span class="tag">render_video.py</span><span class="tag">tests/test_render.py</span><span class="tag">route: kimi K3</span></div>
+            <div class="decide"><button data-act="approve">approve</button><button data-act="reject">reject</button><input placeholder="annotation…"></div>
+          </div>
+        </div>
+      </div>
+      <div class="copybar"><button id="copy-decisions">Copy decisions as JSON</button><span id="copy-state"></span></div>
+    </section>
+
+    <section id="arena">
+      <div class="sec-head"><span class="num">03</span><h2>Arena &amp; spawner</h2></div>
+      <div class="diagram">
+        <svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#D97757"/>
+            </marker>
+          </defs>
+          <!-- spawn shell -->
+          <circle cx="430" cy="180" r="165" fill="none" stroke="#3A3833" stroke-width="1.5" stroke-dasharray="6 5"/>
+          <circle cx="430" cy="180" r="115" fill="none" stroke="#3A3833" stroke-width="1.5" stroke-dasharray="6 5"/>
+          <text x="430" y="38" text-anchor="middle" font-size="11" fill="#8F8D82">spawn shell · r ~ U(8, 15) m · full azimuth · elevation −10°…+75°</text>
+          <!-- arena -->
+          <rect x="395" y="145" width="70" height="70" rx="4" fill="#252420" stroke="#F0B79C" stroke-width="2"/>
+          <text x="430" y="238" text-anchor="middle" font-size="10.5" fill="#F0B79C">3×3 m · sides kill (position check, no geometry)</text>
+          <!-- humanoid -->
+          <circle cx="430" cy="180" r="6" fill="#8FA56E"/>
+          <text x="430" y="172" text-anchor="middle" font-size="10" fill="#B6CC96">humanoid</text>
+          <!-- precise shot -->
+          <circle cx="286" cy="96" r="5" fill="#D97757"/>
+          <path d="M291 99 L424 176" stroke="#D97757" stroke-width="1.8" marker-end="url(#arr)"/>
+          <text x="262" y="86" font-size="10.5" fill="#D97757">precise · v ~ U(4,9) m/s</text>
+          <!-- offset shot -->
+          <circle cx="592" cy="288" r="5" fill="#D97757"/>
+          <path d="M587 284 L448 196" stroke="#D97757" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+          <text x="598" y="304" font-size="10.5" fill="#D97757">offset · + N(0, 0.35²) m</text>
+          <!-- overhead shot -->
+          <circle cx="536" cy="60" r="5" fill="#D97757"/>
+          <path d="M532 64 L438 172" stroke="#D97757" stroke-width="1.8" marker-end="url(#arr)"/>
+          <text x="548" y="56" font-size="10.5" fill="#D97757">overhead (prone gets targeted too)</text>
+          <!-- pass-through annotation -->
+          <path d="M180 260 L400 208" stroke="#8F8D82" stroke-width="1.5" stroke-dasharray="3 4" marker-end="url(#arr)"/>
+          <circle cx="180" cy="260" r="5" fill="#8F8D82"/>
+          <text x="120" y="278" font-size="10.5" fill="#8F8D82">misses pass through walls/floor · TTL despawn</text>
+          <!-- legend -->
+          <text x="30" y="330" font-size="10.5" fill="#8F8D82">aim computed ONCE at launch → target = sampled body link (head .15 · torso .30 · pelvis .20 · thighs .10×2 · shins .075×2) · max 4 in flight · intervals U(1.0, 2.5) s</text>
+        </svg>
+        <p class="caption">Top view. Straight constant-velocity flight (gravity-compensated bodies); contact masks make projectiles collide with humanoid geoms only.</p>
+      </div>
+    </section>
+
+    <section id="reward">
+      <div class="sec-head"><span class="num">04</span><h2>Reward &amp; observation</h2></div>
+      <div class="rtable">
+        <div class="row"><div class="cell head">Term</div><div class="cell head">Value</div><div class="cell head">Purpose</div></div>
+        <div class="row"><div class="cell">upright</div><div class="cell"><code>+1.0</code> while torso z ∈ [1.0, 2.0]</div><div class="cell">makes lounging unprofitable and pays for getting back up — without fall termination</div></div>
+        <div class="row"><div class="cell">proximity shaping</div><div class="cell"><code>−0.5 · Σ max(0, 1.2 − d)²</code></div><div class="cell">dense signal long before a hit; d = projectile → nearest of head/torso/pelvis</div></div>
+        <div class="row"><div class="cell">hit</div><div class="cell"><code>−50</code>, projectile despawns</div><div class="cell">episode continues — knockdown + recovery stays in the data</div></div>
+        <div class="row"><div class="cell">wall</div><div class="cell"><code>−100</code>, terminate</div><div class="cell">the only death; enforces the 3×3 cell</div></div>
+        <div class="row"><div class="cell">control cost</div><div class="cell"><code>−0.05 · ‖a‖²</code></div><div class="cell">damps twitchy, anatomically legal but alien flailing</div></div>
+      </div>
+      <p class="caption" style="margin-top:14px">Observation: humanoid <code>qpos[2:]</code> + <code>qvel</code> (projectile joints masked out) + 4 slots × <code>[active, rel_pos·3, rel_vel·3]</code>, sorted by time-to-closest-approach — memorization impossible, reaction sufficient.</p>
+    </section>
+
+    <section id="risks">
+      <div class="sec-head"><span class="num">05</span><h2>Risks &amp; mitigations</h2></div>
+      <div class="risks">
+        <div class="row"><div class="cell head">Risk</div><div class="cell head">Sev</div><div class="cell head">Mitigation</div></div>
+        <div class="row">
+          <div class="cell">Degenerate policies: prone camping, corner hiding, early strolling.</div>
+          <div class="cell"><span class="sev high">HIGH</span></div>
+          <div class="cell">Pose-targeted spawner (prone → overhead fire), 3×3 lethal-walled cell (nowhere to stroll), upright bonus. Reward-weight iteration after first runs is planned follow-up, not a defect.</div>
+        </div>
+        <div class="row">
+          <div class="cell">Headless rendering (no GPU): osmesa/egl unverified on this box.</div>
+          <div class="cell"><span class="sev med">MED</span></div>
+          <div class="cell">Task 4 verifies both backends, apt-installs what's missing, and records which worked; training never depends on rendering.</div>
+        </div>
+        <div class="row">
+          <div class="cell">Shared box: ambient load 11–14 of 12 vCPUs; tenant spikes stretch wall-clock.</div>
+          <div class="cell"><span class="sev med">MED</span></div>
+          <div class="cell">Everything under <code>nice -n 10</code>, 6 workers max, torch capped at 2 threads; budget ~2× wall-clock margin (measured 18% run variance).</div>
+        </div>
+        <div class="row">
+          <div class="cell">Lockstep SubprocVecEnv lands below the 8.8 k/s independent-process aggregate.</div>
+          <div class="cell"><span class="sev low">LOW</span></div>
+          <div class="cell">Expected ~5–7 k sim-steps/s synchronous; already inside the 1.5–15 h/run envelope. Not worth async complexity for v1.</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <div class="sec-head"><span class="num">06</span><h2>Evidence this fits the box</h2></div>
+      <div class="evidence">
+        <div class="row"><div class="txt"><strong>Measured here (2026-08-03, under live load):</strong> Humanoid-v5 1,655 env-steps/s single process; 8,856/s across 6 processes; PPO 2×256 update 18–24 k samples/s → all-in ~1.8–3.6 k env-steps/s ⇒ 10 M steps ≈ 1–1.5 h, 100 M ≈ 8–15 h.</div></div>
+        <div class="row"><div class="txt"><strong>PAC-MAN</strong> (Yang, Li, Ames · <a href="https://arxiv.org/abs/2607.28623">arXiv:2607.28623</a>) — humanoid dodges thrown balls with PPO; closest-approach evasion + upright reward + fall penalty; no curriculum needed; validates the exact observation design.</div></div>
+        <div class="row"><div class="txt"><strong>Step budgets:</strong> tuned PPO walks Humanoid-v4 in 10 M steps (<a href="https://raw.githubusercontent.com/DLR-RM/rl-baselines3-zoo/master/hyperparams/ppo.yml">rl-baselines3-zoo</a>); SAC reaches 5,265 return at 1 M (<a href="https://docs.cleanrl.dev/rl-algorithms/ppo/">CleanRL benchmarks</a>) but is gradient-bound on this CPU — PPO is the route.</div></div>
+        <div class="row"><div class="txt"><strong>MuJoCo CPU throughput:</strong> 27-DoF humanoid ~30 k physics-steps/s per modern core (<a href="https://github.com/google-deepmind/mujoco/issues/986">mujoco#986</a>) — physics is not the bottleneck; the Python/learner loop is, and it's measured above.</div></div>
+      </div>
+    </section>
+
+  </div>
+  <script>
+    document.querySelectorAll('.milestone .decide').forEach(d => {
+      d.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+        const approve = b.dataset.act === 'approve';
+        d.querySelectorAll('button').forEach(x => x.classList.remove('on-approve', 'on-reject'));
+        b.classList.add(approve ? 'on-approve' : 'on-reject');
+        d.closest('.milestone').dataset.decision = b.dataset.act;
+      }));
+    });
+    document.getElementById('copy-decisions').addEventListener('click', () => {
+      const out = [...document.querySelectorAll('.milestone')].map(m => ({
+        task: Number(m.dataset.task),
+        title: m.querySelector('h3').textContent,
+        decision: m.dataset.decision || 'undecided',
+        annotation: m.querySelector('.decide input').value || null,
+      }));
+      navigator.clipboard.writeText(JSON.stringify(out, null, 2)).then(() => {
+        document.getElementById('copy-state').textContent = 'copied ✓';
+        setTimeout(() => document.getElementById('copy-state').textContent = '', 2000);
+      });
+    });
+  </script>
+</body>
+</html>
