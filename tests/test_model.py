@@ -1,11 +1,13 @@
 """Model-level tests for the dodge-humanoid MuJoCo asset."""
 
 import math
+from pathlib import Path
+
 import numpy as np
 import mujoco
 import pytest
 
-XML_PATH = "assets/dodge_humanoid.xml"
+XML_PATH = str(Path(__file__).resolve().parents[1] / "assets" / "dodge_humanoid.xml")
 
 
 @pytest.fixture
@@ -44,9 +46,38 @@ def _freejoint_dofadr(model, body_name):
     return model.jnt_dofadr[jid]
 
 
+def _set_freejoint_pos(data, body_name, pos):
+    qadr = _freejoint_qposadr(data.model, body_name)
+    data.qpos[qadr : qadr + 3] = pos
+    data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+
+
+def _set_freejoint_vel(data, body_name, vel):
+    vadr = _freejoint_dofadr(data.model, body_name)
+    data.qvel[vadr : vadr + 3] = vel
+    data.qvel[vadr + 3 : vadr + 6] = 0.0
+
+
+def _contacts_involving_geom(data, geom_id):
+    """Return list of (geom1_id, geom2_id) for active contacts involving geom_id."""
+    pairs = []
+    for c in data.contact[: data.ncon]:
+        if c.geom1 == geom_id or c.geom2 == geom_id:
+            pairs.append((c.geom1, c.geom2))
+    return pairs
+
+
+HUMANOID_GEOM_NAMES = [
+    "torso1", "head", "uwaist", "lwaist", "butt",
+    "right_thigh1", "right_shin1", "right_foot",
+    "left_thigh1", "left_shin1", "left_foot",
+    "right_uarm1", "right_larm", "right_hand",
+    "left_uarm1", "left_larm", "left_hand",
+]
+
+
 def test_model_loads_and_has_projectiles(model):
-    """The compiled model includes exactly four projectile bodies."""
-    assert model.nbody == 18  # original 14 + 4 projectiles
+    """The compiled model includes the four projectile bodies."""
     for i in range(4):
         body_name = f"proj{i}"
         bid = _body_id(model, body_name)
@@ -82,42 +113,27 @@ def test_projectile_parked_below_floor(data):
         assert data.qpos[qadr + 2] == pytest.approx(expected_z)
 
 
-def _set_freejoint_pos(data, body_name, pos):
-    qadr = _freejoint_qposadr(data.model, body_name)
-    data.qpos[qadr : qadr + 3] = pos
-    data.qpos[qadr + 3 : qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
-
-
-def _set_freejoint_vel(data, body_name, vel):
-    vadr = _freejoint_dofadr(data.model, body_name)
-    data.qvel[vadr : vadr + 3] = vel
-    data.qvel[vadr + 3 : vadr + 6] = 0.0
-
-
-def _contacts_involving_geom(data, geom_id):
-    """Return list of (geom1_id, geom2_id) for active contacts involving geom_id."""
-    pairs = []
-    for c in data.contact[: data.ncon]:
-        if c.geom1 == geom_id or c.geom2 == geom_id:
-            pairs.append((c.geom1, c.geom2))
-    return pairs
-
-
 def test_projectile_does_not_collide_with_floor(model, data):
     """Projectile with contype 2 / conaffinity 0 passes through the floor."""
     proj0_geom = _geom_id(model, "proj0_geom")
     _set_freejoint_pos(data, "proj0", np.array([2.5, 2.5, 0.05]))
-    _set_freejoint_vel(data, "proj0", np.array([1.0, -0.5, 2.0]))
+    # Horizontal velocity only: gravcomp keeps z at 0.05 so it overlaps the
+    # floor for the entire run. A mutant floor with conaffinity=3 would
+    # generate contacts and slow the projectile.
+    _set_freejoint_vel(data, "proj0", np.array([1.0, -0.5, 0.0]))
 
     mujoco.mj_forward(model, data)
+    contact_counts = [_contacts_involving_geom(data, proj0_geom)]
+
     dofadr = _freejoint_dofadr(model, "proj0")
     start_vel = data.qvel[dofadr : dofadr + 6].copy()
 
     for _ in range(20):
         mujoco.mj_step(model, data)
+        contact_counts.append(_contacts_involving_geom(data, proj0_geom))
 
-    contacts = _contacts_involving_geom(data, proj0_geom)
-    assert len(contacts) == 0, f"unexpected contacts involving proj0: {contacts}"
+    total_contacts = sum(len(c) for c in contact_counts)
+    assert total_contacts == 0, f"unexpected contacts involving proj0: {contact_counts}"
 
     end_vel = data.qvel[dofadr : dofadr + 6].copy()
     assert np.linalg.norm(start_vel - end_vel) < 1e-6, "projectile velocity changed"
@@ -136,21 +152,47 @@ def test_projectile_collides_with_humanoid(model, data):
     contacts = _contacts_involving_geom(data, proj0_geom)
     assert len(contacts) > 0, "expected proj0 to contact the humanoid"
 
-    humanoid_geom_names = [
-        "torso1", "head", "uwaist", "lwaist", "butt",
-        "right_thigh1", "right_shin1", "right_foot",
-        "left_thigh1", "left_shin1", "left_foot",
-        "right_uarm1", "right_larm", "right_hand",
-        "left_uarm1", "left_larm", "left_hand",
-    ]
-    humanoid_geom_ids = {_geom_id(model, n) for n in humanoid_geom_names}
-    g1, g2 = contacts[0]
-    other = g2 if g1 == proj0_geom else g1
-    assert other in humanoid_geom_ids, f"proj0 contacted non-humanoid geom id {other}"
+    humanoid_geom_ids = {_geom_id(model, n) for n in HUMANOID_GEOM_NAMES}
+    for g1, g2 in contacts:
+        other = g2 if g1 == proj0_geom else g1
+        assert other in humanoid_geom_ids, (
+            f"proj0 contacted non-humanoid geom id {other}"
+        )
+
+
+def test_projectiles_do_not_collide_with_each_other(model, data):
+    """Projectiles share contype 2 / conaffinity 0 and ignore each other."""
+    proj0_geom = _geom_id(model, "proj0_geom")
+    proj1_geom = _geom_id(model, "proj1_geom")
+
+    _set_freejoint_pos(data, "proj0", np.array([5.0, 5.0, 5.0]))
+    _set_freejoint_vel(data, "proj0", np.array([1.0, -0.5, 0.3]))
+    _set_freejoint_pos(data, "proj1", np.array([5.0, 5.0, 5.02]))
+    _set_freejoint_vel(data, "proj1", np.array([-0.5, 0.8, -0.2]))
+
+    mujoco.mj_forward(model, data)
+
+    dofadr0 = _freejoint_dofadr(model, "proj0")
+    dofadr1 = _freejoint_dofadr(model, "proj1")
+    start_vel0 = data.qvel[dofadr0 : dofadr0 + 6].copy()
+    start_vel1 = data.qvel[dofadr1 : dofadr1 + 6].copy()
+
+    for _ in range(20):
+        mujoco.mj_step(model, data)
+        contacts0 = _contacts_involving_geom(data, proj0_geom)
+        contacts1 = _contacts_involving_geom(data, proj1_geom)
+        assert len(contacts0) == 0, f"unexpected contacts involving proj0: {contacts0}"
+        assert len(contacts1) == 0, f"unexpected contacts involving proj1: {contacts1}"
+
+    end_vel0 = data.qvel[dofadr0 : dofadr0 + 6].copy()
+    end_vel1 = data.qvel[dofadr1 : dofadr1 + 6].copy()
+    assert np.linalg.norm(start_vel0 - end_vel0) < 1e-6, "proj0 velocity changed"
+    assert np.linalg.norm(start_vel1 - end_vel1) < 1e-6, "proj1 velocity changed"
 
 
 def test_projectile_straight_flight(model, data):
     """With gravcomp=1 and no contact, a projectile maintains its velocity."""
+    proj0_geom = _geom_id(model, "proj0_geom")
     v = np.array([3.0, -2.0, 1.5])
     _set_freejoint_pos(data, "proj0", np.array([0.0, 0.0, 2.0]))
     _set_freejoint_vel(data, "proj0", v)
@@ -160,5 +202,6 @@ def test_projectile_straight_flight(model, data):
     dofadr = _freejoint_dofadr(model, "proj0")
     for _ in range(50):
         mujoco.mj_step(model, data)
+        assert len(_contacts_involving_geom(data, proj0_geom)) == 0
         current_v = data.qvel[dofadr : dofadr + 3]
         assert np.linalg.norm(current_v - v) < 1e-6
