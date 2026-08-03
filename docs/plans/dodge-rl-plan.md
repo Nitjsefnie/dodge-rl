@@ -60,8 +60,11 @@ evasion reward + upright terms + fall penalty.
 2. Create `/root/dodge-rl/.venv` with `python3 -m venv --system-site-packages
    .venv`; `nice -n 10 .venv/bin/pip install "gymnasium[mujoco]"
    stable-baselines3 pytest imageio imageio-ffmpeg`; then
-   `.venv/bin/pip freeze > requirements.txt`. Verify `import torch` in the venv
-   reports 2.13.0+cpu (from system site-packages).
+   `.venv/bin/pip freeze --local > requirements.txt` (`--local` is required: a
+   plain freeze in a `--system-site-packages` venv captures the whole system
+   python, including a `file:///tmp` torch wheel pin that would violate the
+   torch constraint). Verify `import torch` in the venv reports 2.13.0+cpu
+   (from system site-packages).
 3. `assets/dodge_humanoid.xml`: copy the installed Gymnasium humanoid model
    (`.venv/lib/python3.13/site-packages/gymnasium/envs/mujoco/assets/humanoid.xml`)
    and modify:
