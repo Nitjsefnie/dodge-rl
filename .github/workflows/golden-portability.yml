@@ -1,0 +1,57 @@
+name: golden-portability
+
+# Is the golden trajectory hash portable across machines, or does it encode the
+# CPU it was generated on?
+#
+# Observed 2026-08-03 on one commit: the `ci` job hashed
+# cd3999d6…(the value generated on the 12-vCPU AMD box) while the `bench` job
+# hashed 109b05a9… on an Intel Xeon Platinum 8573C. Same commit, same runner
+# image, same Python — so the suspect is the hardware, via runtime-dispatched
+# SIMD in MuJoCo/numpy.
+#
+# That is a plausible mechanism, not a finding. This workflow is the
+# experiment: N legs land on N independently-assigned runners, each printing
+# its CPU model, its ISA flags and its hash. If the hash partitions cleanly by
+# CPU model, microarchitecture is the cause. If two legs on the *same* model
+# disagree, something in the env is nondeterministic and the hash was never a
+# gate at all.
+#
+# torch is deliberately not installed: golden_traj.py exercises the env only,
+# and leaving it out keeps a leg under a minute.
+
+on:
+  workflow_dispatch:
+    inputs:
+      legs:
+        description: 'How many independent runners to sample (1-10)'
+        default: '6'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install env dependencies (no torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Probe
+        run: |
+          echo "leg=${{ matrix.leg }}"
+          grep -m1 'model name' /proc/cpuinfo
+          grep -m1 -o 'avx512[a-z0-9_]*' /proc/cpuinfo | head -5 || echo "no avx512"
+          python -c "import numpy, mujoco, gymnasium; print('numpy', numpy.__version__, '| mujoco', mujoco.__version__, '| gymnasium', gymnasium.__version__)"
+          echo -n "HASH "
+          python bench/golden_traj.py
