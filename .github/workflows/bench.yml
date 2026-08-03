@@ -83,16 +83,28 @@ jobs:
       - name: Fail-fast smoke (one short measurement)
         run: python bench/bench_learn.py --total-timesteps 4096 --n-envs 2
 
+      # Inputs go through the environment rather than being interpolated into
+      # the script text. A note containing an apostrophe ("the runner's cores")
+      # closed the shell's quoting and failed the whole sweep; the same hole is
+      # a script-injection vector for any attacker-controlled input.
       - name: Interleaved sweep
+        env:
+          SWEEP_VARIANTS: ${{ inputs.variants }}
+          SWEEP_ROUNDS: ${{ inputs.rounds }}
+          SWEEP_WARMUP: ${{ inputs.warmup_rounds }}
+          SWEEP_TIMESTEPS: ${{ inputs.total_timesteps }}
+          SWEEP_N_ENVS: ${{ inputs.n_envs }}
+          SWEEP_BASELINE: ${{ inputs.baseline }}
+          SWEEP_NOTE: ${{ inputs.note }}
         run: |
           python bench/sweep.py \
-            --variants '${{ inputs.variants }}' \
-            --rounds '${{ inputs.rounds }}' \
-            --warmup-rounds '${{ inputs.warmup_rounds }}' \
-            --total-timesteps '${{ inputs.total_timesteps }}' \
-            --n-envs '${{ inputs.n_envs }}' \
-            --baseline '${{ inputs.baseline }}' \
-            --note '${{ inputs.note }}' \
+            --variants "$SWEEP_VARIANTS" \
+            --rounds "$SWEEP_ROUNDS" \
+            --warmup-rounds "$SWEEP_WARMUP" \
+            --total-timesteps "$SWEEP_TIMESTEPS" \
+            --n-envs "$SWEEP_N_ENVS" \
+            --baseline "$SWEEP_BASELINE" \
+            --note "$SWEEP_NOTE" \
             --json-out sweep-results.json
 
       - name: Upload results
