@@ -2,6 +2,7 @@
 """PPO training script for DodgeHumanoid-v0."""
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -14,6 +15,40 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+
+
+# Intra-op thread cap for the learner's torch ops. Overridable from the
+# environment so bench/sweep.py can A/B thread counts across otherwise
+# identical processes; the default is what training has always used.
+TORCH_NUM_THREADS = int(os.environ.get("DODGE_TORCH_THREADS", "2"))
+
+# The PPO configuration, as a dict so bench/bench_learn.py can build the exact
+# same model instead of restating the hyperparameters (a hand-copied config
+# drifts from the one that actually runs). ``env`` and ``seed`` are supplied by
+# the caller.
+PPO_KWARGS = dict(
+    policy="MlpPolicy",
+    policy_kwargs=dict(net_arch=[256, 256]),
+    n_steps=2048,
+    batch_size=4096,
+    learning_rate=3e-4,
+    gamma=0.99,
+    gae_lambda=0.95,
+    clip_range=0.2,
+    ent_coef=0.0,
+    device="cpu",
+    verbose=0,
+)
+
+
+def apply_rollout_optimizations(model) -> None:
+    """Install throughput optimizations on an already-built PPO model.
+
+    Kept as a single entry point so the benchmark (bench/bench_learn.py) and
+    real training exercise the identical code path. Must never change *what*
+    is computed — only how fast it is computed.
+    """
+    return None
 
 
 def make_env_factory(seed: int, rank: int):
@@ -90,7 +125,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    torch.set_num_threads(2)
+    torch.set_num_threads(TORCH_NUM_THREADS)
 
     total_steps = args.total_steps
     n_envs = args.n_envs
@@ -121,21 +156,9 @@ def main() -> None:
         model = PPO.load(args.resume, env=vec_env, device="cpu")
         set_random_seed(args.seed)
     else:
-        model = PPO(
-            "MlpPolicy",
-            vec_env,
-            policy_kwargs=dict(net_arch=[256, 256]),
-            n_steps=2048,
-            batch_size=4096,
-            learning_rate=3e-4,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.0,
-            device="cpu",
-            seed=seed,
-            verbose=0,
-        )
+        model = PPO(env=vec_env, seed=seed, **PPO_KWARGS)
+
+    apply_rollout_optimizations(model)
 
     checkpoint_callback = CheckpointCallback(
         save_freq=max(1_000_000 // n_envs, 1),
